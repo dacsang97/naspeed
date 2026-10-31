@@ -78,6 +78,27 @@ or ran:
 • running app-0e1f2c…   why=key changed: binary, dir:core
 ```
 
+## Run summaries: `--summarize`
+
+```sh
+ns test --summarize
+```
+
+writes `<target>/naspeed/test-runs/<id>.json`: totals (replayed, passed,
+failed, time saved) and, for every test binary, its package, key, the hashed
+parts of the key, whether it replayed, passed or failed and why, and the
+inputs recorded for it. Two summaries can be diffed to see what changed
+between runs, like `turbo run --summarize`.
+
+## Hashing cost
+
+File hashes are remembered by stat, the way git's index works:
+`(path, size, mtime, inode) → hash` in `<store>/memo/test-file-hashes.tsv`.
+A file whose stat is unchanged is not read again, so keying a test binary
+costs a walk and a `stat` per file. A file modified within the last two
+seconds is hashed but not remembered, since a second edit could keep its
+mtime. On naspeed's own unit tests a replay went from 1.4 s to 0.2 s.
+
 ## Configuration
 
 ```toml

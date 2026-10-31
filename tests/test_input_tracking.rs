@@ -227,3 +227,51 @@ fn traced_runs_rerun_on_every_dependency_change() {
 fn untraced_runs_rerun_on_every_dependency_change() {
     every_dependency_change_reruns(false);
 }
+
+#[test]
+fn summarize_writes_one_json_per_run_and_hashes_are_memoised() {
+    let p = Probe::new("summary", cfg!(target_os = "macos"));
+    let run = || {
+        let out = p
+            .command(NASPEED)
+            .args(["test", "--summarize", "-p", "app", "--offline"])
+            .env("PROBE_MODE", "good")
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "{err}");
+        let path = err
+            .lines()
+            .find_map(|l| l.split("path=").nth(1))
+            .unwrap_or_else(|| panic!("no summary path in:\n{err}"))
+            .trim()
+            .to_owned();
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        json
+    };
+    // Settled sources (an hour old) may be remembered; fresh ones are racy.
+    let hour_ago = filetime::FileTime::from_system_time(
+        std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
+    );
+    for rel in ["core/src/lib.rs", "core/data/value.txt", "app/src/lib.rs"] {
+        filetime::set_file_mtime(p.dir.join(rel), hour_ago).unwrap();
+    }
+    let first = run();
+    assert_eq!(first["totals"]["passed"], 1, "{first:#}");
+    let bin = &first["binaries"][0];
+    assert_eq!(bin["status"], "passed");
+    assert_eq!(bin["why"], "no earlier run");
+    assert!(bin["components"]["binary"].is_string(), "{bin:#}");
+
+    let second = run();
+    assert_eq!(second["totals"]["replayed"], 1, "{second:#}");
+    assert_eq!(second["binaries"][0]["status"], "replayed");
+
+    // Source and fixture hashes are remembered by stat in the store.
+    let memo =
+        std::fs::read_to_string(p.sb.store.join("memo/test-file-hashes.tsv")).unwrap_or_default();
+    for rel in ["core/src/lib.rs", "core/data/value.txt", "app/src/lib.rs"] {
+        assert!(memo.contains(rel), "{rel} not memoised:\n{memo}");
+    }
+}

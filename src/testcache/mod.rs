@@ -14,6 +14,7 @@
 //! file outside the packages.
 //! Doctests run under rustdoc, not the runner, and always run.
 
+pub mod hash_memo;
 pub mod test_key;
 pub mod test_plan;
 pub mod trace;
@@ -41,6 +42,8 @@ pub const TEST_RESULT_VERSION: u32 = 2;
 
 /// Set by `ns test --explain` for the runners cargo starts.
 pub const EXPLAIN_ENV: &str = "NASPEED_TEST_EXPLAIN";
+/// Set by `ns test --summarize`: JSON lines file the runners append to.
+pub const SUMMARY_ENV: &str = "NASPEED_TEST_SUMMARY";
 
 #[derive(Debug, Args)]
 pub struct TestArgs {
@@ -50,6 +53,10 @@ pub struct TestArgs {
     /// Say for every test binary why it replays or runs (which input changed).
     #[arg(long)]
     pub explain: bool,
+    /// Write a JSON summary of the run (every binary: key parts, recorded
+    /// inputs, replayed or ran and why) to `<target>/naspeed/test-runs/`.
+    #[arg(long)]
+    pub summarize: bool,
     /// Arguments for `cargo test` (put test-binary arguments after `--`).
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub cargo_args: Vec<OsString>,
@@ -198,6 +205,16 @@ pub fn run(args: TestArgs) -> Result<u8> {
     if args.explain {
         cmd.env(EXPLAIN_ENV, "1");
     }
+    let summary = if args.summarize && plan.is_some() {
+        let dir = project.graph.target_dir.join("naspeed").join("test-runs");
+        std::fs::create_dir_all(&dir).context("create test-runs dir")?;
+        let id = format!("{}-{}", now_secs(), std::process::id());
+        let lines = dir.join(format!("{id}.jsonl"));
+        cmd.env(SUMMARY_ENV, &lines);
+        Some((dir, id, lines))
+    } else {
+        None
+    };
     let status = cmd
         .args(&args.cargo_args)
         .env(crate::ui::INDENT_ENV, (crate::ui::depth() + 1).to_string())
@@ -205,6 +222,12 @@ pub fn run(args: TestArgs) -> Result<u8> {
         .context("run cargo test")?;
     drop(plan);
     let code = exit_code(status);
+    if let Some((dir, id, lines)) = summary {
+        match write_summary(&dir, &id, &lines, &shown, code, start) {
+            Ok(path) => crate::ui_info!("run summary"; path = path.display()),
+            Err(e) => crate::ui_warn!(format!("run summary not written: {e:#}")),
+        }
+    }
     if code == 0 {
         crate::ui_info!("cargo test passed");
     } else {
@@ -222,13 +245,80 @@ pub fn run(args: TestArgs) -> Result<u8> {
     Ok(code.clamp(0, 255) as u8)
 }
 
+/// Fold the runners' JSON lines into `<dir>/<id>.json`.
+fn write_summary(
+    dir: &Path,
+    id: &str,
+    lines: &Path,
+    args: &[String],
+    exit_code: i32,
+    start: Instant,
+) -> Result<PathBuf> {
+    let text = std::fs::read_to_string(lines).unwrap_or_default();
+    let binaries: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let count = |status: &str| binaries.iter().filter(|b| b["status"] == status).count();
+    let saved: u64 = binaries
+        .iter()
+        .filter(|b| b["status"] == "replayed")
+        .filter_map(|b| b["ms"].as_u64())
+        .sum();
+    let summary = serde_json::json!({
+        "id": id,
+        "args": args,
+        "exit_code": exit_code,
+        "duration_ms": start.elapsed().as_millis() as u64,
+        "totals": {
+            "replayed": count("replayed"),
+            "passed": count("passed"),
+            "failed": count("failed"),
+            "saved_ms": saved,
+        },
+        "binaries": binaries,
+    });
+    let path = dir.join(format!("{id}.json"));
+    std::fs::write(&path, serde_json::to_vec_pretty(&summary)?)
+        .with_context(|| format!("write {}", path.display()))?;
+    let _ = std::fs::remove_file(lines);
+    Ok(path)
+}
+
+/// One binary's line in the `--summarize` file, if one was asked for.
+fn summarize(entry: serde_json::Value) {
+    let Some(path) = std::env::var_os(SUMMARY_ENV) else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let mut line = entry.to_string();
+        line.push('\n');
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+fn components_json(parts: &[(String, String)]) -> serde_json::Value {
+    serde_json::Value::Object(
+        parts
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect(),
+    )
+}
+
 fn passthrough(binary: &Path, args: &[OsString]) -> i32 {
     crate::wrapper::passthrough(binary, args)
 }
 
 /// `naspeed __test-run <binary> <args…>`, started by cargo.
 pub fn run_binary(binary: &Path, args: &[OsString]) -> i32 {
-    match try_cached_run(binary, args) {
+    let code = try_cached_run(binary, args);
+    hash_memo::flush();
+    match code {
         Some(code) => code,
         None => passthrough(binary, args),
     }
@@ -295,6 +385,7 @@ fn changed_components(last: &LastRun, now: &[(String, String)]) -> Vec<String> {
 
 fn try_cached_run(binary: &Path, args: &[OsString]) -> Option<i32> {
     let plan = TestPlan::read(Path::new(&std::env::var_os(PLAN_ENV)?)).ok()?;
+    hash_memo::init(&plan.store);
     let env = current_env();
     let manifest_dir = PathBuf::from(env.get("CARGO_MANIFEST_DIR")?);
     let package = plan.packages.get(&manifest_dir)?;
@@ -372,6 +463,16 @@ fn try_cached_run(binary: &Path, args: &[OsString]) -> Option<i32> {
                 let _ = filetime::set_file_mtime(&path, filetime::FileTime::now());
                 // gc renames the log away under the exclusive lock.
                 let _lock = store.shared_lock();
+                summarize(serde_json::json!({
+                    "binary": name,
+                    "package": manifest_dir.strip_prefix(&plan.workspace_root).unwrap_or(&manifest_dir),
+                    "key": k.key,
+                    "status": "replayed",
+                    "ms": result.run_ms,
+                    "traced": result.inputs.is_some(),
+                    "components": components_json(&k.components),
+                    "inputs": result.inputs,
+                }));
                 store.append_usage(&Record::TestHit {
                     key: k.key,
                     saved_ms: result.run_ms,
@@ -416,6 +517,20 @@ fn try_cached_run(binary: &Path, args: &[OsString]) -> Option<i32> {
         .ok()?;
     let run_ms = started.elapsed().as_millis() as u64;
     let code = exit_code(output.status);
+    let summary_base = serde_json::json!({
+        "binary": name,
+        "package": manifest_dir.strip_prefix(&plan.workspace_root).unwrap_or(&manifest_dir),
+        "key": k.key,
+        "why": reason,
+        "ms": run_ms,
+        "components": components_json(&k.components),
+    });
+    if code != 0 {
+        let mut e = summary_base.clone();
+        e["status"] = "failed".into();
+        e["exit_code"] = code.into();
+        summarize(e);
+    }
     if code == 0
         && let (Some(stdout), Some(stderr)) = (output.stdout, output.stderr)
     {
@@ -437,6 +552,18 @@ fn try_cached_run(binary: &Path, args: &[OsString]) -> Option<i32> {
             );
         }
         let inputs = traced.map(|t| t.inputs);
+        let mut e = summary_base;
+        e["status"] = "passed".into();
+        e["traced"] = (if complete {
+            "complete"
+        } else if inputs.is_some() {
+            "partial"
+        } else {
+            "no"
+        })
+        .into();
+        e["inputs"] = serde_json::to_value(&inputs).unwrap_or_default();
+        summarize(e);
         let result = TestResult {
             version: TEST_RESULT_VERSION,
             key: k.key.clone(),

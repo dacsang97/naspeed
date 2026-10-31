@@ -12,8 +12,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 
+use super::hash_memo;
 use super::test_plan::{PackageInputs, TestPlan};
-use crate::store::content_hash::hash_file;
 use crate::wrapper::Env;
 use crate::wrapper::cache_key::KeyHasher;
 
@@ -51,7 +51,7 @@ pub fn hash_input(path: &Path, target_dir: &Path) -> Result<Option<String>> {
         Err(e) => return Err(e).with_context(|| format!("stat {}", path.display())),
     };
     if !meta.is_dir() {
-        return Ok(Some(hash_file(path)?.to_hex().to_string()));
+        return Ok(Some(hash_memo::hash(path)?));
     }
     let mut h = KeyHasher(blake3::Hasher::new());
     let target_dir = target_dir.to_path_buf();
@@ -77,7 +77,7 @@ pub fn hash_input(path: &Path, target_dir: &Path) -> Result<Option<String>> {
         let rel = rel.to_string_lossy();
         match entry.file_type() {
             Some(t) if t.is_file() => {
-                h.field(&format!("f:{rel}"), &hash_file(entry.path())?.to_hex());
+                h.field(&format!("f:{rel}"), &hash_memo::hash(entry.path())?);
             }
             Some(t) if t.is_symlink() => {
                 let target = std::fs::read_link(entry.path())?;
@@ -113,10 +113,7 @@ pub fn key(plan: &TestPlan, package: &PackageInputs, run: &RunContext) -> Result
     let mut parts: Vec<(String, String)> = vec![("version".into(), TEST_KEY_VERSION.into())];
     parts.push((
         "binary".into(),
-        hash_file(run.binary)
-            .with_context(|| format!("hash {}", run.binary.display()))?
-            .to_hex()
-            .to_string(),
+        hash_memo::hash(run.binary).with_context(|| format!("hash {}", run.binary.display()))?,
     ));
     parts.push((
         "args".into(),
@@ -164,7 +161,7 @@ pub fn key(plan: &TestPlan, package: &PackageInputs, run: &RunContext) -> Result
         for bin in bins {
             let exe = profile.join(format!("{bin}{}", std::env::consts::EXE_SUFFIX));
             let hash = match std::fs::metadata(&exe) {
-                Ok(_) => hash_file(&exe)?.to_hex().to_string(),
+                Ok(_) => hash_memo::hash(&exe)?,
                 Err(_) => "\0missing".into(),
             };
             parts.push((format!("bin:{bin}"), hash));
@@ -218,7 +215,7 @@ pub fn workspace_files_hash(plan: &TestPlan) -> Result<String> {
             let rel = entry.path().strip_prefix(root).unwrap_or(entry.path());
             h.field(
                 &format!("f:{}", rel.to_string_lossy()),
-                &hash_file(entry.path())?.to_hex(),
+                &hash_memo::hash(entry.path())?,
             );
         }
     }

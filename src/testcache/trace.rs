@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::store::content_hash::hash_file;
+use super::hash_memo;
 use crate::wrapper::Env;
 
 /// The tracer for this target, or empty when it could not be built.
@@ -86,7 +86,7 @@ fn env_input(name: &str, env: &Env) -> Input {
 
 fn file_input(path: &Path) -> Input {
     let hash = match std::fs::metadata(path) {
-        Ok(m) if m.is_file() => hash_file(path).ok().map(|h| h.to_hex().to_string()),
+        Ok(m) if m.is_file() => hash_memo::hash(path).ok(),
         // A directory opened for reading (std::fs::read_dir on some libcs).
         Ok(m) if m.is_dir() => return dir_input(path),
         _ => None,
