@@ -6,13 +6,20 @@
 //! `ns fmt` is the formatting step alone.
 
 use std::ffi::OsString;
+use std::io::Write;
 use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Args;
 
+use std::path::PathBuf;
+
+use super::fmt_cache::FmtCache;
 use crate::commands::stats::human_ms;
+use crate::config::Settings;
+use crate::project::WorkspaceGraph;
+use crate::store::volume_root;
 
 #[derive(Debug, Args)]
 pub struct CheckArgs {
@@ -71,11 +78,109 @@ pub fn fmt_args(fix: bool, user: &[OsString]) -> Vec<OsString> {
 
 /// `ns fmt [--check]`.
 pub fn run_fmt(args: FmtArgs) -> Result<u8> {
-    Ok(if step("fmt", &fmt_args(!args.check, &args.cargo_args))? {
-        0
+    let ok = if args.cargo_args.is_empty() {
+        cached_fmt(!args.check)?
     } else {
-        1
-    })
+        step("fmt", &fmt_args(!args.check, &args.cargo_args))?
+    };
+    Ok(if ok { 0 } else { 1 })
+}
+
+/// The workspace and the store on its volume, when both are there.
+fn workspace_and_store() -> Option<(WorkspaceGraph, PathBuf)> {
+    let graph = WorkspaceGraph::load(&std::env::current_dir().ok()?).ok()?;
+    let settings = Settings::load();
+    let store = volume_root::existing_ancestor(&graph.root)
+        .and_then(|d| volume_root::store_for(d, &settings.stores))?;
+    Some((graph, store))
+}
+
+/// `cargo fmt -p <name>` for each package, several at once (cargo fmt
+/// alone formats one target after another). Output of a failing package is
+/// printed whole; returns the packages that passed.
+fn fmt_packages<'a>(fix: bool, names: &[&'a str]) -> Result<Vec<&'a str>> {
+    let jobs = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(names.len().max(1));
+    let queue = std::sync::Mutex::new(names.to_vec());
+    let results = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                while let Some(name) = queue.lock().unwrap().pop() {
+                    let picked = [OsString::from("-p"), OsString::from(name)];
+                    let out = cargo().args(fmt_args(fix, &picked)).output();
+                    results.lock().unwrap().push((name, out));
+                }
+            });
+        }
+    });
+    let mut passed = Vec::new();
+    let mut results = results.into_inner().unwrap();
+    results.sort_by_key(|(name, _)| *name);
+    for (name, out) in results {
+        let out = out.with_context(|| format!("run cargo fmt -p {name}"))?;
+        if out.status.success() {
+            passed.push(name);
+        } else {
+            let _ = std::io::stdout().write_all(&out.stdout);
+            let _ = std::io::stderr().write_all(&out.stderr);
+        }
+    }
+    Ok(passed)
+}
+
+/// `cargo fmt` for the packages with sources not known to be formatted
+/// (see `fmt_cache`), every package when no store is available. Packages
+/// that pass are remembered even when others fail.
+fn cached_fmt(fix: bool) -> Result<bool> {
+    let started = Instant::now();
+    let took = |started: Instant| human_ms(started.elapsed().as_millis() as u64);
+    let Some((graph, store)) = workspace_and_store() else {
+        return step("fmt", &fmt_args(fix, &[]));
+    };
+    let mut cache = FmtCache::open(&store, &graph)?;
+    let dirty = cache.dirty_members(&graph);
+    let unchanged = graph.members.len() - dirty.len();
+    // One cargo call for everything that needs a look; only when it fails
+    // are packages run one by one, to remember the ones that are clean.
+    let passed = if dirty.is_empty() {
+        Vec::new()
+    } else {
+        let picked: Vec<OsString> = dirty
+            .iter()
+            .flat_map(|name| [OsString::from("-p"), OsString::from(*name)])
+            .collect();
+        let together = cargo()
+            .args(fmt_args(fix, &picked))
+            .output()
+            .context("run cargo fmt")?;
+        if together.status.success() {
+            dirty.clone()
+        } else {
+            fmt_packages(fix, &dirty)?
+        }
+    };
+    if !passed.is_empty() {
+        cache.record(&graph, &passed)?;
+    }
+    let failed = dirty.len() - passed.len();
+    if failed == 0 {
+        eprintln!(
+            "ns: fmt ok ({}; {} packages checked, {unchanged} unchanged since they were last formatted)",
+            took(started),
+            dirty.len()
+        );
+        Ok(true)
+    } else {
+        eprintln!(
+            "ns: fmt FAILED ({}; {failed} of {} packages need formatting, {unchanged} unchanged)",
+            took(started),
+            dirty.len()
+        );
+        Ok(false)
+    }
 }
 
 /// `cargo clippy` arguments: the whole workspace and every target unless
@@ -147,7 +252,7 @@ fn step(name: &str, args: &[OsString]) -> Result<bool> {
 
 pub fn run(args: CheckArgs) -> Result<u8> {
     let mut failed = Vec::new();
-    if !args.no_fmt && !step("fmt", &fmt_args(args.fix, &[]))? {
+    if !args.no_fmt && !cached_fmt(args.fix)? {
         failed.push("fmt");
     }
     // Lint even when formatting failed: one run reports everything.

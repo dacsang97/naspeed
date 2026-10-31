@@ -52,6 +52,15 @@ fn clean_workspace_passes_and_slips_fail() {
     assert!(stderr(&out).contains("ns: fmt ok"), "{}", stderr(&out));
     assert!(stderr(&out).contains("ns: clippy ok"), "{}", stderr(&out));
 
+    // Nothing changed: formatting is skipped, from the store's record.
+    let again = ns_check(&sb, &dir, &["--offline"]);
+    assert!(again.status.success());
+    assert!(
+        stderr(&again).contains("0 packages checked"),
+        "{}",
+        stderr(&again)
+    );
+
     // A formatting slip (before the test module, so clippy has nothing to add).
     let lib = dir.join("crates/greeter/src/lib.rs");
     let text = std::fs::read_to_string(&lib).unwrap();
