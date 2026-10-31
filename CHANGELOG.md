@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/dacsang97/naspeed/compare/v0.1.2...v0.2.0) - 2026-10-31
+
+### Added
+
+- add ns check and ns fmt ([#8](https://github.com/dacsang97/naspeed/pull/8))
+
 ## [0.1.2](https://github.com/dacsang97/naspeed/compare/v0.1.1...v0.1.2) - 2026-10-31
 
 ### Other
