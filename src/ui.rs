@@ -39,7 +39,8 @@ pub struct Indent(());
 
 impl Drop for Indent {
     fn drop(&mut self) {
-        let _ = DEPTH.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| d.checked_sub(1));
+        // Each guard comes from one `indent()`, so this never goes below zero.
+        DEPTH.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
