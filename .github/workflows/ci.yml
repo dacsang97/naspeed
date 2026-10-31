@@ -71,15 +71,19 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.ref || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
-      # naspeed caches its own build; only pushes to main save the store.
-      # Unit tests only: the integration suite in tests/ needs Docker, zig and
-      # reflink filesystems that hosted runners do not provide. `naspeed test`
-      # replays test binaries unchanged since a passing run.
+      # The released naspeed caches the build; only pushes to main save the
+      # store.
       - uses: dacsang97/naspeed-action@v1
         with:
           cache-key: test
-          args: test --locked --lib --bins
-      # Also compiles the integration tests, through the same store.
+      # The tests run under the naspeed built from this commit, so its test
+      # runner and tracer are the ones being tested (a released naspeed would
+      # test the PR with last release's runner). Unit tests, plus the input
+      # tracking suite: the rest of tests/ needs Docker, zig and reflink
+      # filesystems that hosted runners do not provide.
+      - run: cargo build --locked --bin naspeed
+      - run: ./target/debug/naspeed test --locked --lib --bins --test test_input_tracking
+      # Also compiles the other integration tests, through the same store.
       - run: cargo check --locked --all-targets
 
   package:

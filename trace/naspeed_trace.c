@@ -20,6 +20,7 @@
 #include <dlfcn.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -258,14 +259,95 @@ static DIR *t_opendir(const char *path) {
 }
 INTERPOSE(t_opendir, opendir);
 
+// System binaries are arm64e on Apple silicon, and this library is not:
+// with SIP on, dyld drops DYLD_INSERT_LIBRARIES for them anyway; with SIP
+// off (CI runners), dyld would try to insert it and kill the process. So a
+// system binary is started without the variable, exactly as SIP would.
+static int is_system_path(const char *p) {
+    static const char *const dirs[] = {"/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/",
+                                       "/usr/libexec/", "/System/", NULL};
+    for (int i = 0; dirs[i]; i++)
+        if (strncmp(p, dirs[i], strlen(dirs[i])) == 0) return 1;
+    return 0;
+}
+
+// `file` as execvp would find it: itself when it has a slash, else the
+// first executable match on PATH. Empty when nothing matches.
+static void resolve_file(const char *file, char *out, size_t n) {
+    out[0] = 0;
+    if (!file || !*file) return;
+    if (strchr(file, '/')) {
+        snprintf(out, n, "%s", file);
+        return;
+    }
+    const char *path = env_lookup("PATH");
+    if (!path) path = "/usr/bin:/bin:/usr/sbin:/sbin";
+    while (*path) {
+        const char *end = strchr(path, ':');
+        size_t len = end ? (size_t)(end - path) : strlen(path);
+        char cand[PATH_MAX];
+        if (len > 0 && len + strlen(file) + 2 <= sizeof cand) {
+            memcpy(cand, path, len);
+            cand[len] = '/';
+            strcpy(cand + len + 1, file);
+            if (access(cand, X_OK) == 0) {
+                snprintf(out, n, "%s", cand);
+                return;
+            }
+        }
+        if (!end) break;
+        path = end + 1;
+    }
+}
+
+// A copy of `envp` (or of the process environment) without
+// DYLD_INSERT_LIBRARIES; NULL when out of memory.
+static char **without_insert(char *const envp[]) {
+    char *const *src = envp ? envp : *_NSGetEnviron();
+    size_t n = 0;
+    while (src[n]) n++;
+    char **dst = malloc((n + 1) * sizeof *dst);
+    if (!dst) return NULL;
+    size_t j = 0;
+    for (size_t i = 0; i < n; i++)
+        if (strncmp(src[i], "DYLD_INSERT_LIBRARIES=", 22) != 0) dst[j++] = src[i];
+    dst[j] = NULL;
+    return dst;
+}
+
+// The environment a child started from `file` gets: `envp` itself, or a
+// stripped copy (*owned set) for a system binary.
+static char *const *child_env(const char *file, char *const envp[], char ***owned) {
+    char resolved[PATH_MAX];
+    *owned = NULL;
+    resolve_file(file, resolved, sizeof resolved);
+    if (!resolved[0] || !is_system_path(resolved)) return envp;
+    *owned = without_insert(envp);
+    return *owned ? *owned : envp;
+}
+
 static int t_execve(const char *path, char *const argv[], char *const envp[]) {
     log_exec(path);
-    return execve(path, argv, envp);
+    char **owned;
+    char *const *env = child_env(path, envp, &owned);
+    int r = execve(path, argv, env);
+    free(owned);
+    return r;
 }
 INTERPOSE(t_execve, execve);
 
 static int t_execvp(const char *file, char *const argv[]) {
     log_exec(file);
+    char resolved[PATH_MAX];
+    resolve_file(file, resolved, sizeof resolved);
+    if (resolved[0] && is_system_path(resolved)) {
+        char **env = without_insert(NULL);
+        if (env) {
+            int r = execve(resolved, argv, env);
+            free(env);
+            return r;
+        }
+    }
     return execvp(file, argv);
 }
 INTERPOSE(t_execvp, execvp);
@@ -273,14 +355,22 @@ INTERPOSE(t_execvp, execvp);
 static int t_posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *fa,
                          const posix_spawnattr_t *attr, char *const argv[], char *const envp[]) {
     log_exec(path);
-    return posix_spawn(pid, path, fa, attr, argv, envp);
+    char **owned;
+    char *const *env = child_env(path, envp, &owned);
+    int r = posix_spawn(pid, path, fa, attr, argv, env);
+    free(owned);
+    return r;
 }
 INTERPOSE(t_posix_spawn, posix_spawn);
 
 static int t_posix_spawnp(pid_t *pid, const char *file, const posix_spawn_file_actions_t *fa,
                           const posix_spawnattr_t *attr, char *const argv[], char *const envp[]) {
     log_exec(file);
-    return posix_spawnp(pid, file, fa, attr, argv, envp);
+    char **owned;
+    char *const *env = child_env(file, envp, &owned);
+    int r = posix_spawnp(pid, file, fa, attr, argv, env);
+    free(owned);
+    return r;
 }
 INTERPOSE(t_posix_spawnp, posix_spawnp);
 
