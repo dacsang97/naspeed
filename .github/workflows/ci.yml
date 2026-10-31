@@ -72,15 +72,15 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       # naspeed caches its own build; only pushes to main save the store.
+      # Unit tests only: the integration suite in tests/ needs Docker, zig and
+      # reflink filesystems that hosted runners do not provide. `naspeed test`
+      # replays test binaries unchanged since a passing run.
       - uses: dacsang97/naspeed-action@v1
         with:
           cache-key: test
+          args: test --locked --lib --bins
+      # Also compiles the integration tests, through the same store.
       - run: cargo check --locked --all-targets
-      # Unit tests only: the integration suite in tests/ needs Docker, zig and
-      # reflink filesystems that hosted runners do not provide.
-      # `naspeed test` replays test binaries unchanged since a passing run.
-      - run: naspeed test --locked --lib --bins
-      - run: naspeed stats
 
   package:
     name: package
