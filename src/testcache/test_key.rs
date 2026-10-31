@@ -17,7 +17,7 @@ use crate::store::content_hash::hash_file;
 use crate::wrapper::Env;
 use crate::wrapper::cache_key::KeyHasher;
 
-pub const TEST_KEY_VERSION: &str = "naspeed-test-v1";
+pub const TEST_KEY_VERSION: &str = "naspeed-test-v2";
 
 /// libtest flags whose runs are not test results.
 const UNCACHEABLE_ARGS: &[&str] = &["--list", "--bench", "--help", "-h"];
@@ -101,50 +101,125 @@ pub struct RunContext<'a> {
     pub manifest_dir: &'a Path,
 }
 
-pub fn key(plan: &TestPlan, package: &PackageInputs, run: &RunContext) -> Result<String> {
+/// The static key and its labelled components (hashed values only), kept
+/// with a stored pass so `ns test --explain` can say what changed.
+pub struct Key {
+    pub key: String,
+    pub components: Vec<(String, String)>,
+}
+
+pub fn key(plan: &TestPlan, package: &PackageInputs, run: &RunContext) -> Result<Key> {
     let root = &plan.workspace_root;
-    let mut h = KeyHasher(blake3::Hasher::new());
-    h.field("version", TEST_KEY_VERSION);
-    h.field(
-        "binary",
-        &hash_file(run.binary)
+    let mut parts: Vec<(String, String)> = vec![("version".into(), TEST_KEY_VERSION.into())];
+    parts.push((
+        "binary".into(),
+        hash_file(run.binary)
             .with_context(|| format!("hash {}", run.binary.display()))?
-            .to_hex(),
-    );
-    for (i, arg) in run.args.iter().enumerate() {
-        h.field(&format!("arg{i}"), arg);
-    }
-    h.field("package", &rel(run.manifest_dir, root));
-    h.field("cwd", &rel(run.cwd, run.manifest_dir));
-    for name in key_env_names(run.env, &plan.env) {
-        h.field(
-            &format!("env:{name}"),
-            run.env.get(name).map(String::as_str).unwrap_or("\0unset"),
-        );
+            .to_hex()
+            .to_string(),
+    ));
+    parts.push((
+        "args".into(),
+        blake3::hash(run.args.join("\0").as_bytes())
+            .to_hex()
+            .to_string(),
+    ));
+    parts.push(("package".into(), rel(run.manifest_dir, root).into_owned()));
+    parts.push(("cwd".into(), rel(run.cwd, run.manifest_dir).into_owned()));
+    let names = key_env_names(run.env, &plan.env)
+        .into_iter()
+        .map(str::to_owned)
+        .chain(package.env_names.iter().cloned())
+        .collect::<std::collections::BTreeSet<String>>();
+    for name in names {
+        let value = run.env.get(&name).map(String::as_str).unwrap_or("\0unset");
+        parts.push((
+            format!("env:{name}"),
+            blake3::hash(value.as_bytes()).to_hex().to_string(),
+        ));
     }
     for dir in &package.dirs {
         let hash = hash_input(dir, &plan.target_dir)?;
-        h.field(
-            &format!("dir:{}", rel(dir, root)),
-            hash.as_deref().unwrap_or("\0missing"),
-        );
+        parts.push((
+            format!("dir:{}", rel(dir, root)),
+            hash.unwrap_or_else(|| "\0missing".into()),
+        ));
     }
     for input in &plan.inputs {
         let hash = hash_input(input, &plan.target_dir)?;
-        h.field(
-            &format!("input:{}", rel(input, root)),
-            hash.as_deref().unwrap_or("\0missing"),
-        );
+        parts.push((
+            format!("input:{}", rel(input, root)),
+            hash.unwrap_or_else(|| "\0missing".into()),
+        ));
     }
+    // Any binary of the workspace, not only the package's: an integration
+    // test may run another member's binary from the profile dir.
     // `<profile>/deps/<test>-<hash>` → `<profile>/<bin>`.
     if let Some(profile) = run.binary.parent().and_then(Path::parent) {
-        for bin in &package.bins {
+        let bins = if plan.all_bins.is_empty() {
+            &package.bins
+        } else {
+            &plan.all_bins
+        };
+        for bin in bins {
             let exe = profile.join(format!("{bin}{}", std::env::consts::EXE_SUFFIX));
             let hash = match std::fs::metadata(&exe) {
                 Ok(_) => hash_file(&exe)?.to_hex().to_string(),
                 Err(_) => "\0missing".into(),
             };
-            h.field(&format!("bin:{bin}"), &hash);
+            parts.push((format!("bin:{bin}"), hash));
+        }
+    }
+    let mut h = KeyHasher(blake3::Hasher::new());
+    for (label, value) in &parts {
+        h.field(label, value);
+    }
+    Ok(Key {
+        key: h.finish(),
+        components: parts,
+    })
+}
+
+/// Files of the workspace outside every member dir (gitignore-aware,
+/// without `.git`, the target dir and `[test].exclude`): what a test
+/// may read from the repository beyond its packages. Hashed only for runs
+/// the tracer could not follow.
+pub fn workspace_files_hash(plan: &TestPlan) -> Result<String> {
+    let root = &plan.workspace_root;
+    let mut overrides = ignore::overrides::OverrideBuilder::new(root);
+    for glob in &plan.exclude {
+        overrides.add(&format!("!{glob}"))?;
+    }
+    let target = plan.target_dir.clone();
+    let members = plan.member_dirs.clone();
+    let walker = WalkBuilder::new(root)
+        .hidden(false)
+        .require_git(false)
+        .git_global(false)
+        .overrides(overrides.build()?)
+        .sort_by_file_path(|a, b| a.cmp(b))
+        .filter_entry(move |e| {
+            let p = e.path();
+            e.file_name() != ".git"
+                && !p.starts_with(&target)
+                && !members.iter().any(|m| p.starts_with(m))
+        })
+        .build();
+    let mut h = KeyHasher(blake3::Hasher::new());
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                h.field("walk-error", &e.to_string());
+                continue;
+            }
+        };
+        if entry.file_type().is_some_and(|t| t.is_file()) {
+            let rel = entry.path().strip_prefix(root).unwrap_or(entry.path());
+            h.field(
+                &format!("f:{}", rel.to_string_lossy()),
+                &hash_file(entry.path())?.to_hex(),
+            );
         }
     }
     Ok(h.finish())
@@ -175,10 +250,15 @@ mod tests {
             env: vec!["DATABASE_URL".into()],
             inputs: vec![root.join("Cargo.lock")],
             packages: Default::default(),
+            all_bins: vec!["app".into(), "tool".into()],
+            member_dirs: vec![pkg.clone()],
+            exclude: vec!["docs/**".into()],
+            trace: false,
         };
         let package = PackageInputs {
             dirs: vec![pkg],
             bins: vec!["app".into()],
+            env_names: vec!["APP_MODE".into()],
         };
         (dir, plan, package, binary)
     }
@@ -197,6 +277,7 @@ mod tests {
             },
         )
         .unwrap()
+        .key
     }
 
     #[test]
@@ -227,7 +308,31 @@ mod tests {
         let rebuilt = key_with(&plan, &package, &binary, &env);
         assert_ne!(rebuilt, edited);
         std::fs::write(root.join("Cargo.lock"), "lock2").unwrap();
-        assert_ne!(key_with(&plan, &package, &binary, &env), rebuilt);
+        let relocked = key_with(&plan, &package, &binary, &env);
+        assert_ne!(relocked, rebuilt);
+
+        // A variable the sources read, and another member's binary.
+        env.insert("APP_MODE".into(), "x".into());
+        let moded = key_with(&plan, &package, &binary, &env);
+        assert_ne!(moded, relocked);
+        std::fs::write(root.join("target/debug/tool"), "tool v1").unwrap();
+        assert_ne!(key_with(&plan, &package, &binary, &env), moded);
+    }
+
+    #[test]
+    fn workspace_files_cover_the_root_but_not_members_or_exclusions() {
+        let (dir, plan, _, _) = setup();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("shared")).unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("shared/v.txt"), "1").unwrap();
+        let base = workspace_files_hash(&plan).unwrap();
+        std::fs::write(root.join("docs/guide.md"), "edited").unwrap();
+        std::fs::write(root.join("app/src/lib.rs"), "member change").unwrap();
+        std::fs::write(root.join("target/debug/app"), "build output").unwrap();
+        assert_eq!(workspace_files_hash(&plan).unwrap(), base);
+        std::fs::write(root.join("shared/v.txt"), "2").unwrap();
+        assert_ne!(workspace_files_hash(&plan).unwrap(), base);
     }
 
     #[test]
