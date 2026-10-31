@@ -242,6 +242,8 @@ impl ImageRun {
 
 fn ns_image(workspace: &Path, store: &Path, extra: &[&str], binaries: &[PathBuf]) -> ImageRun {
     let mut cmd = Command::new(NASPEED);
+    // Plain log lines: tests match on their text.
+    cmd.env("NO_COLOR", "1");
     cmd.arg("image").args(extra);
     for ((platform, _), path) in TARGETS.iter().zip(binaries) {
         cmd.arg("--binary")

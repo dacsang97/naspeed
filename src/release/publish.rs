@@ -87,11 +87,8 @@ pub fn publish(
     })?;
     for file in uploads {
         gh.upload_asset(&upload_url, file)?;
-        println!(
-            "uploaded {}",
-            file.file_name().unwrap_or_default().to_string_lossy()
-        );
+        crate::ui_info!("uploaded"; name = file.file_name().unwrap_or_default().to_string_lossy());
     }
-    println!("release: {html_url}");
+    crate::ui_info!("published GitHub release"; url = html_url);
     Ok(())
 }

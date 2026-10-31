@@ -69,7 +69,11 @@ pub fn run(cmd: CacheCommand) -> Result<u8> {
                 .with_context(|| format!("create {}", args.dir.display()))?;
             let root = pick_store(&settings, args.store, &args.dir, false)?;
             let cap = (args.max_gb * 1024.0 * 1024.0 * 1024.0) as u64;
+            let start = std::time::Instant::now();
+            crate::ui_info!("exporting store"; store = root.display(), dir = args.dir.display());
+            let _export = crate::ui::indent();
             export::run(&root, &args.dir, cap, settings.cow_mode)?;
+            crate::ui::took(start);
         }
         CacheCommand::Import(args) => {
             if !args.dir.join("entries").is_dir() {
@@ -79,7 +83,11 @@ pub fn run(cmd: CacheCommand) -> Result<u8> {
                 );
             }
             let root = pick_store(&settings, args.store, &args.dir, true)?;
+            let start = std::time::Instant::now();
+            crate::ui_info!("importing store"; dir = args.dir.display(), store = root.display());
+            let _import = crate::ui::indent();
             import::run(&root, &args.dir, settings.cow_mode)?;
+            crate::ui::took(start);
         }
         CacheCommand::Serve(args) => return super::cache_peer::serve(&settings, args),
         CacheCommand::Push(args) => return super::cache_peer::push(&settings, args),

@@ -62,10 +62,10 @@ pub fn run(cmd: CiCommand) -> Result<u8> {
         CiCommand::Init(args) => {
             let project = Project::load_cwd()?;
             for path in init(&project, args.force)? {
-                println!("wrote {}", path.display());
+                crate::ui_info!("wrote workflow"; path = path.display());
             }
             for note in notes(&project)? {
-                println!("note: {note}");
+                crate::ui_warn!(note);
             }
             Ok(0)
         }

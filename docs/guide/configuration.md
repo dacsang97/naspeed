@@ -38,6 +38,14 @@ These override the file:
 | `NASPEED_REMOTE_TOKEN` | Token for peers and `serve` |
 | `NASPEED_REMOTE_CONNECT_MS` | Connect timeout per peer (default 800) |
 | `NASPEED_LOG=naspeed=debug` | Turn on logging |
+| `NO_COLOR=1` | Plain log lines, no colors |
+| `CLICOLOR_FORCE=1` | Colored log lines even when stderr is not a terminal (GitHub Actions is colored by default) |
+| `NASPEED_UI_INDENT=<n>` | Start log lines `n` levels deep, so a wrapper's own steps can nest naspeed's (naspeed-action sets it) |
+
+Command output is a tree of log lines on stderr: `• step` at the top, nested
+`• detail` lines, `key=value` fields in one column and `• took: 12s` under
+slow steps. Program output stays on stdout: test binaries,
+`naspeed stats --json`, the image digest of `ns image`.
 | `NASPEED_LOG_FILE=<path>` | Write logs to this file |
 
 `NASPEED_DISABLE=1` affects only later builds; see [Limits](./limits).

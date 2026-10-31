@@ -189,7 +189,7 @@ pub fn base_env(
 /// the release. Errors name the command (from ns.toml) but not its env.
 pub fn run_hooks(hooks: &[String], root: &Path, env: &[(String, String)]) -> Result<()> {
     for hook in hooks {
-        println!("ns release: before hook: {hook}");
+        crate::ui_info!("running before hook"; hook = hook);
         let status = Command::new("sh")
             .arg("-c")
             .arg(hook)

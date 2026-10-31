@@ -238,7 +238,7 @@ pub fn build_all(input: &MatrixInput, targets: &[String], jobs: usize) -> Result
                     let Ok(Some(lane)) = next else { break };
                     for target in lane {
                         for build in input.builds.iter().filter(|b| b.targets.contains(target)) {
-                            eprintln!("ns release: building {} for {target}", build.id());
+                            crate::ui_info!("building"; build = build.id(), target = target);
                             if let Err(err) = input.build_one(build, target)
                                 && let Ok(mut f) = failures.lock()
                             {

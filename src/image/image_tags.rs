@@ -32,7 +32,7 @@ pub fn resolve_tags(
     for template in templates {
         let rendered = render(template, ctx)?;
         if rendered.is_empty() {
-            eprintln!("ns image: tag {template:?} is empty for this release; skipping it");
+            crate::ui_warn!("tag is empty for this release; skipping it"; template = format!("{template:?}"));
             continue;
         }
         let tag = rendered;
@@ -40,7 +40,7 @@ pub fn resolve_tags(
             bail!("[image].tags entry {template:?} renders to invalid tag {tag:?}");
         }
         if tag == "latest" && ctx.skip_latest {
-            eprintln!("ns image: not tagging latest (snapshot or pre-release)");
+            crate::ui_info!("not tagging latest (snapshot or pre-release)");
             continue;
         }
         tags.push(tag);

@@ -91,47 +91,25 @@ fn collect(store: &Store, days: i64) -> Result<StoreStats> {
 }
 
 fn print(s: &StoreStats) {
-    println!("store {} — last {} day(s)", s.store, s.days);
+    crate::ui_info!("store"; path = s.store, days = s.days);
+    let _store = crate::ui::indent();
     let rate = s
         .hit_rate
         .map(|r| format!("{:.1}%", r * 100.0))
         .unwrap_or_else(|| "n/a".into());
-    println!(
-        "  rustc   : {} hits, {} misses ({rate}); saved {} of compile time, spent {} compiling misses",
-        s.hits,
-        s.misses,
-        human_ms(s.saved_ms),
-        human_ms(s.compile_ms)
-    );
-    println!(
-        "  tests   : {} runs replayed from cache, {} ran; saved {}",
-        s.test_hits,
-        s.test_runs,
-        human_ms(s.test_saved_ms)
-    );
-    println!(
-        "  peers   : {} entries fetched ({})",
-        s.remote_hits,
-        human(s.remote_bytes)
-    );
-    println!(
-        "  total   : {} saved",
-        human_ms(s.saved_ms + s.test_saved_ms)
-    );
+    crate::ui_info!("rustc"; hits = s.hits, misses = s.misses, hit_rate = rate,
+        saved = human_ms(s.saved_ms), compiling_misses = human_ms(s.compile_ms));
+    crate::ui_info!("tests"; replayed = s.test_hits, ran = s.test_runs,
+        saved = human_ms(s.test_saved_ms));
+    crate::ui_info!("peers"; fetched = s.remote_hits, size = human(s.remote_bytes));
+    crate::ui_info!("total"; saved = human_ms(s.saved_ms + s.test_saved_ms));
     if !s.top_crates.is_empty() {
-        println!("  top crates by time saved (all time):");
+        crate::ui_info!("top crates by time saved (all time)");
+        let _top = crate::ui::indent();
         for c in &s.top_crates {
-            println!(
-                "    {:<40} {:>6} hits  {}",
-                c.crate_name,
-                c.hits,
-                human_ms(c.saved_ms)
-            );
+            crate::ui_info!(c.crate_name; hits = c.hits, saved = human_ms(c.saved_ms));
         }
     }
-    println!(
-        "  Saved time is each hit's original compile time minus its restore time;\n  hits on entries stored before naspeed recorded compile times count as 0."
-    );
 }
 
 pub fn run(args: StatsArgs) -> Result<u8> {
@@ -148,14 +126,14 @@ pub fn run(args: StatsArgs) -> Result<u8> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&all)?);
     } else if all.is_empty() {
-        println!("no store found: run `naspeed setup` first");
+        crate::ui_warn!("no store found: run `naspeed setup` first");
     } else {
-        for (i, s) in all.iter().enumerate() {
-            if i > 0 {
-                println!();
-            }
+        for s in &all {
             print(s);
         }
+        crate::ui_info!(
+            "saved time is each hit's original compile time minus its restore time; hits on entries stored before naspeed recorded compile times count as 0"
+        );
     }
     Ok(0)
 }

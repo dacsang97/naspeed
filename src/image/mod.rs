@@ -158,10 +158,8 @@ pub fn run(args: ImageArgs) -> Result<u8> {
         .transpose()?;
     let layout = dist.join("oci");
     oci_layout::write_layout(&layout, &built, &index, &index_digest, &tags, sbom.as_ref())?;
-    eprintln!(
-        "ns image: wrote OCI layout {} (base layers referenced by digest only)",
-        layout.display()
-    );
+    crate::ui_info!("wrote OCI layout (base layers referenced by digest only)";
+        path = layout.display());
 
     let repo_ref = format!("{}/{}", target.registry, target.repository);
     if args.push {
@@ -173,20 +171,19 @@ pub fn run(args: ImageArgs) -> Result<u8> {
             &tags,
             &blob_cache_dir(&dist),
         )?;
-        eprintln!("ns image: {stats}");
+        crate::ui_info!(stats.to_string());
         if let Some(sbom) = &sbom {
             sbom_attach::push(clients.get(&target.registry)?, &target.repository, sbom)?;
-            eprintln!(
-                "ns image: pushed SBOM {repo_ref}:{} ({repo_ref}@{})",
-                sbom.tag, sbom.manifest_digest
-            );
+            crate::ui_info!("pushed SBOM";
+                tag = format!("{repo_ref}:{}", sbom.tag),
+                digest = format!("{repo_ref}@{}", sbom.manifest_digest));
         }
     } else {
         for tag in &tags {
-            eprintln!("ns image: would push {repo_ref}:{tag} (dry run; pass --push to upload)");
+            crate::ui_info!("would push (dry run; pass --push to upload)"; tag = format!("{repo_ref}:{tag}"));
         }
         if let Some(sbom) = &sbom {
-            eprintln!("ns image: would push SBOM {repo_ref}:{}", sbom.tag);
+            crate::ui_info!("would push SBOM"; tag = format!("{repo_ref}:{}", sbom.tag));
         }
     }
     println!("{repo_ref}@{index_digest}");

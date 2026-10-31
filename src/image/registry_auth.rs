@@ -119,10 +119,9 @@ fn from_docker_config(config: &DockerConfig, registry: &str) -> Result<Option<Cr
         .find_map(|key| config.cred_helpers.get(key))
         .or(config.creds_store.as_ref());
     if let Some(helper) = helper {
-        eprintln!(
-            "ns image: not running docker credential helper `{helper}` for {registry}; \
-             continuing anonymously (put an `auth` entry in docker config.json, or set GITHUB_TOKEN for ghcr.io)"
-        );
+        crate::ui_warn!(
+            "not running the docker credential helper; continuing anonymously (put an `auth` entry in docker config.json, or set GITHUB_TOKEN for ghcr.io)";
+            helper = helper, registry = registry);
     }
     Ok(None)
 }

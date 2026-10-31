@@ -96,13 +96,9 @@ pub fn build_platform(
         os: input.platform.os.clone(),
         variant: None,
     });
-    eprintln!(
-        "ns image: {} {} on {base}: layer {} ({} bytes), manifest {manifest_digest}",
-        input.platform,
-        input.path.display(),
-        layer.digest,
-        layer.blob.len()
-    );
+    crate::ui_info!("built platform image";
+        platform = input.platform, binary = input.path.display(), base = base,
+        layer = layer.digest, bytes = layer.blob.len(), manifest = manifest_digest);
     let built = BuiltPlatform {
         base: base.clone(),
         base_layers,

@@ -36,6 +36,7 @@ impl Home {
 
     fn naspeed(&self, args: &[&str]) -> String {
         let out = Command::new(NASPEED)
+            .env("NO_COLOR", "1")
             .args(args)
             .env("HOME", &self.home)
             .env("CARGO_HOME", &self.cargo_home)
@@ -131,7 +132,7 @@ fn second_setup_keeps_first_backup_and_is_idempotent() {
     h.setup();
     let after_first = h.config_text().unwrap();
     let out = h.setup();
-    assert!(out.contains("(already set)"), "{out}");
+    assert!(out.contains("cargo config already set"), "{out}");
     assert_eq!(h.config_text().unwrap(), after_first);
     assert_eq!(std::fs::read_to_string(h.first_backup()).unwrap(), ORIGINAL);
     let backups = std::fs::read_dir(h.config.join("backups")).unwrap().count();
@@ -183,10 +184,10 @@ fn status_runs_and_reports_store() {
     let h = Home::new(Some(ORIGINAL));
     h.setup();
     let out = h.naspeed(&["status"]);
-    assert!(out.contains("build.rustc-wrapper"), "{out}");
+    assert!(out.contains("cargo wraps rustc with naspeed"), "{out}");
     assert!(
         out.contains(&format!(
-            "store {}",
+            "path={}",
             std::fs::canonicalize(&h.store).unwrap().display()
         )),
         "{out}"

@@ -39,61 +39,58 @@ pub fn registered_targets(store: &Store) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-fn fmt_usage(u: &Usage) -> String {
+/// One log line for a tree's size: logical bytes, and when the filesystem
+/// reports it, how much of that is unshared vs shared through clones.
+fn usage_line(what: &str, u: &Usage) {
     match u.private {
-        Some(p) => format!(
-            "{} logical, {} unshared ({} shared via clones)",
-            human(u.logical),
-            human(p),
-            human(u.logical.saturating_sub(p))
-        ),
-        None => format!(
-            "{} logical (filesystem cannot report sharing)",
-            human(u.logical)
-        ),
+        Some(p) => crate::ui_info!(what; files = u.files, logical = human(u.logical),
+            unshared = human(p), shared = human(u.logical.saturating_sub(p))),
+        None => crate::ui_info!(what; files = u.files, logical = human(u.logical),
+            sharing = "not reported by the filesystem"),
     }
 }
 
 pub fn run(args: StatusArgs) -> Result<u8> {
     let settings = Settings::load();
-    println!("naspeed {}", env!("CARGO_PKG_VERSION"));
+    crate::ui_info!("naspeed"; version = env!("CARGO_PKG_VERSION"));
+    let _top = crate::ui::indent();
 
     let (_, doc) = cargo_config::read_config(&cargo_config_path())?;
     let wrapper = cargo_config::get(&doc, &cargo_config::key(&["build", "rustc-wrapper"]));
     let bin = installed_binary();
     let active =
         wrapper.as_deref().map(|w| w.trim_matches('"')) == Some(bin.to_string_lossy().as_ref());
-    println!(
-        "wrapper : build.rustc-wrapper = {} ({})",
-        wrapper.as_deref().unwrap_or("unset"),
-        if active { "naspeed" } else { "NOT naspeed" }
-    );
+    let wrapper_value = wrapper.as_deref().unwrap_or("unset");
+    if active {
+        crate::ui_info!("cargo wraps rustc with naspeed"; rustc_wrapper = wrapper_value);
+    } else {
+        crate::ui_warn!("cargo does NOT wrap rustc with naspeed"; rustc_wrapper = wrapper_value);
+    }
     if let Ok(env_wrapper) = std::env::var("RUSTC_WRAPPER")
         && !env_wrapper.is_empty()
     {
-        println!("          RUSTC_WRAPPER={env_wrapper} in this shell overrides the config");
+        crate::ui_warn!("RUSTC_WRAPPER in this shell overrides the config"; value = env_wrapper);
     }
     if settings.disabled {
-        println!("          NASPEED_DISABLE is set: every call passes through");
+        crate::ui_warn!("NASPEED_DISABLE is set: every call passes through");
     }
     if let Some(note) =
         cargo_config::load_state(&settings.config_dir).and_then(|s| s.incremental_note)
     {
-        println!("note    : {note}");
+        crate::ui_info!(note);
     }
-    println!(
-        "slots   : {}/{} rustc slots in use, min free memory {} MiB",
-        slot_pool::in_use(&settings.slots_dir(), settings.slots),
-        settings.slots,
-        settings.min_free_mem_mb
-    );
+    crate::ui_info!("rustc slots";
+        in_use = format!("{}/{}", slot_pool::in_use(&settings.slots_dir(), settings.slots), settings.slots),
+        min_free_memory = format!("{} MiB", settings.min_free_mem_mb));
 
     for root in &settings.stores {
-        println!("\nstore {}", root.display());
         if !root.is_dir() {
-            println!("  missing (volume unplugged?) — builds pass through uncached");
+            crate::ui_warn!("store missing (volume unplugged?): builds pass through uncached";
+                path = root.display());
             continue;
         }
+        crate::ui_info!("store"; path = root.display());
+        let _store = crate::ui::indent();
         let store = Store::open(root, settings.cow_mode)?;
         // Fold the usage log only when no gc/wrapper conflicts; otherwise
         // counts are still read from both index and log.
@@ -104,12 +101,8 @@ pub fn run(args: StatusArgs) -> Result<u8> {
         }
         let entries = count_files(&store.entries_dir());
         let objects = tree_usage(&store.objects_dir());
-        println!("  entries : {entries}");
-        println!(
-            "  objects : {} files, {}",
-            objects.files,
-            fmt_usage(&objects)
-        );
+        crate::ui_info!("entries"; count = entries);
+        usage_line("objects", &objects);
         if let Ok(conn) = usage_log::open_index(root) {
             let t = usage_log::totals(root, &conn, 7)?;
             let (hits, misses) = (t.hits, t.misses);
@@ -118,19 +111,13 @@ pub fn run(args: StatusArgs) -> Result<u8> {
             } else {
                 "n/a".into()
             };
-            println!(
-                "  7 days  : {hits} hits, {misses} misses, hit rate {rate}; saved {} compiling, {} testing (`naspeed stats`)",
-                super::stats::human_ms(t.saved_ms),
-                super::stats::human_ms(t.test_saved_ms)
-            );
+            crate::ui_info!("last 7 days (`naspeed stats`)"; hits = hits, misses = misses,
+                hit_rate = rate, saved_compiling = super::stats::human_ms(t.saved_ms),
+                saved_testing = super::stats::human_ms(t.test_saved_ms));
         }
         let targets = registered_targets(&store);
         let live: Vec<_> = targets.iter().filter(|t| t.is_dir()).collect();
-        println!(
-            "  targets : {} registered profile dirs ({} still present)",
-            targets.len(),
-            live.len()
-        );
+        crate::ui_info!("target profile dirs"; registered = targets.len(), present = live.len());
         let mut total = Usage {
             private: Some(0),
             ..Usage::default()
@@ -142,17 +129,15 @@ pub fn run(args: StatusArgs) -> Result<u8> {
             total.private = total.private.zip(u.private).map(|(a, b)| a + b);
         }
         if !live.is_empty() {
-            println!("  target files: {}", fmt_usage(&total));
+            usage_line("target files", &total);
             if let Some(p) = total.private {
-                println!(
-                    "  physical estimate (store objects + unshared target bytes): {}",
-                    human(objects.logical + p)
-                );
+                crate::ui_info!("physical estimate (store objects + unshared target bytes)";
+                    size = human(objects.logical + p));
             }
         }
     }
-    println!(
-        "\n`du` counts every clone at full size; use the unshared/physical numbers above or `df`."
+    crate::ui_info!(
+        "`du` counts every clone at full size; use the unshared/physical numbers above or `df`"
     );
 
     if args.check {
@@ -185,10 +170,11 @@ fn doctor() -> Result<u8> {
     let wrapped = text
         .lines()
         .any(|l| l.contains("Running `") && l.contains("naspeed"));
-    println!(
-        "check   : cargo build -v {} naspeed around rustc",
-        if wrapped { "shows" } else { "does NOT show" }
-    );
+    if wrapped {
+        crate::ui_info!("check: cargo build -v shows naspeed around rustc");
+    } else {
+        crate::ui_error!("check: cargo build -v does NOT show naspeed around rustc");
+    }
     Ok(if wrapped && out.status.success() {
         0
     } else {

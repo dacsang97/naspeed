@@ -109,6 +109,7 @@ impl Sandbox {
     /// Run a naspeed subcommand against this sandbox's store and config.
     pub fn naspeed(&self, args: &[&str]) -> String {
         let out = Command::new(NASPEED)
+            .env("NO_COLOR", "1")
             .args(args)
             .env("NASPEED_CONFIG_DIR", &self.config)
             .env("NASPEED_STORE", &self.store)

@@ -90,10 +90,8 @@ pub fn run(args: SetupArgs) -> Result<u8> {
     let installed = install_binary(&bin)?;
     let alias = crate::setup::ns_alias();
     if !crate::setup::install_ns_alias().with_context(|| format!("create {}", alias.display()))? {
-        eprintln!(
-            "naspeed: {} exists and is not naspeed's; run the front-end as `naspeed dev|release|…`",
-            alias.display()
-        );
+        crate::ui_warn!("ns exists and is not naspeed's; run the front-end as `naspeed dev|release|…`";
+            path = alias.display());
     }
 
     // Cargo config.
@@ -177,46 +175,35 @@ pub fn run(args: SetupArgs) -> Result<u8> {
     }
     cargo_config::save_state(&config_dir, &state)?;
 
-    println!("naspeed setup");
-    println!(
-        "  binary : {}{}",
-        bin.display(),
-        if installed { " (installed)" } else { "" }
-    );
-    println!(
-        "  store  : {} (copy-on-write clones: {})",
-        store_root.display(),
-        if clones {
-            "yes"
-        } else {
-            "NO — cache still speeds builds up but saves no disk"
-        }
-    );
-    println!(
-        "  config : {} {}",
-        cfg_path.display(),
-        if changed {
-            "(updated, backup in ~/.config/naspeed/backups)"
-        } else {
-            "(already set)"
-        }
-    );
-    println!(
-        "  slots  : {} machine-wide rustc slots, build.jobs = {}",
-        Settings::load().slots,
-        args.jobs
-    );
+    crate::ui_info!("setting up naspeed");
+    let _setup = crate::ui::indent();
+    crate::ui_info!(if installed { "binary installed" } else { "binary already installed" };
+        path = bin.display());
+    if clones {
+        crate::ui_info!("store ready"; path = store_root.display(), clones = "yes");
+    } else {
+        crate::ui_warn!("store has no copy-on-write clones: builds are faster but save no disk";
+            path = store_root.display());
+    }
+    if changed {
+        crate::ui_info!("cargo config updated";
+            path = cfg_path.display(), backup = "~/.config/naspeed/backups");
+    } else {
+        crate::ui_info!("cargo config already set"; path = cfg_path.display());
+    }
+    crate::ui_info!("rustc slots"; machine_wide = Settings::load().slots, build_jobs = args.jobs);
     if let Some(note) = &state.incremental_note {
-        println!("  note   : {note}");
+        crate::ui_info!(note);
     }
     for note in cross_notes {
-        println!("  cross  : {note}");
+        crate::ui_info!("cross"; note = note);
     }
     let warnings = shell_env_check::report(&config::home_dir(), &bin);
     if !warnings.is_empty() {
-        println!("\nAction needed (naspeed does not edit shell rc files):");
+        crate::ui_warn!("action needed (naspeed does not edit shell rc files)");
+        let _list = crate::ui::indent();
         for w in warnings {
-            println!("  - {w}");
+            crate::ui_warn!(w);
         }
     }
     Ok(0)

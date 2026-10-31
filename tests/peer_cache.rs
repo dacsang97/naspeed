@@ -20,25 +20,28 @@ struct Peer {
 impl Peer {
     fn start(sb: &Sandbox, store: &Path, extra: &[&str], token: Option<&str>) -> Peer {
         let mut cmd = Command::new(NASPEED);
+        // Plain log lines: tests match on their text.
+        cmd.env("NO_COLOR", "1");
         cmd.args(["cache", "serve", "--listen", "127.0.0.1:0"])
             .args(extra)
             .env("NASPEED_CONFIG_DIR", &sb.config)
             .env("NASPEED_STORE", store)
             .env_remove("NASPEED_REMOTE_TOKEN")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            // naspeed logs on stderr.
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::piped());
         if let Some(t) = token {
             cmd.env("NASPEED_REMOTE_TOKEN", t);
         }
         let mut child = cmd.spawn().unwrap();
-        let mut out = BufReader::new(child.stdout.take().unwrap());
+        let mut out = BufReader::new(child.stderr.take().unwrap());
         let mut line = String::new();
         out.read_line(&mut line).unwrap();
         // Keep draining: a closed pipe would fail the server's later prints.
         std::thread::spawn(move || std::io::copy(&mut out, &mut std::io::sink()));
         let url = line
             .split_whitespace()
-            .find(|w| w.starts_with("http://"))
+            .find_map(|w| w.strip_prefix("url="))
             .unwrap_or_else(|| panic!("no URL in {line:?}"))
             .to_owned();
         Peer { child, url }
@@ -130,6 +133,7 @@ fn served_store_fills_a_fresh_machine() {
 
     // Hits on fetched entries carry the original compile time.
     let stats = Command::new(NASPEED)
+        .env("NO_COLOR", "1")
         .args(["stats", "--json"])
         .env("NASPEED_CONFIG_DIR", &sb.config)
         .env("NASPEED_STORE", &store2)
@@ -176,6 +180,7 @@ fn push_needs_the_token_and_uploads_entries() {
 
     let push = |token: &str| {
         Command::new(NASPEED)
+            .env("NO_COLOR", "1")
             .args(["cache", "push", &peer.url])
             .env("NASPEED_CONFIG_DIR", &sb.config)
             .env("NASPEED_STORE", &sb.store)
@@ -193,19 +198,19 @@ fn push_needs_the_token_and_uploads_entries() {
     assert_eq!(entries(&vps), 0);
 
     let ok = push("s3cret");
-    let text = String::from_utf8_lossy(&ok.stdout);
+    let text = String::from_utf8_lossy(&ok.stderr);
     assert!(
         ok.status.success(),
-        "{text}{}",
-        String::from_utf8_lossy(&ok.stderr)
+        "{}{text}",
+        String::from_utf8_lossy(&ok.stdout)
     );
     assert!(text.contains(&format!("pushed {stored} entries")), "{text}");
     assert_eq!(entries(&vps), stored);
     let again = push("s3cret");
     assert!(
-        String::from_utf8_lossy(&again.stdout).contains(&format!("{stored} already there")),
+        String::from_utf8_lossy(&again.stderr).contains(&format!("already_there={stored}")),
         "{}",
-        String::from_utf8_lossy(&again.stdout)
+        String::from_utf8_lossy(&again.stderr)
     );
 }
 
@@ -217,6 +222,7 @@ fn read_only_peer_refuses_push() {
     std::fs::create_dir_all(&ro).unwrap();
     let peer = Peer::start(&sb, &ro, &[], None);
     let out = Command::new(NASPEED)
+        .env("NO_COLOR", "1")
         .args(["cache", "push", &peer.url])
         .env("NASPEED_CONFIG_DIR", &sb.config)
         .env("NASPEED_STORE", &sb.store)

@@ -19,6 +19,7 @@ pub mod remote;
 pub mod setup;
 pub mod store;
 pub mod testcache;
+pub mod ui;
 pub mod wrapper;
 
 /// Logging is off unless `NASPEED_LOG` is set. In wrapper mode stderr belongs

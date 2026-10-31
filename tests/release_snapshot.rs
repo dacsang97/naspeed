@@ -56,6 +56,8 @@ impl Ws {
     /// cargo/proxy/GitHub variables removed and git confined to `root`.
     fn ns(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
         let mut cmd = Command::new(NASPEED);
+        // Plain log lines: tests match on their text.
+        cmd.env("NO_COLOR", "1");
         for (k, _) in std::env::vars_os() {
             let k = k.to_string_lossy().into_owned();
             let proxy = k.to_ascii_lowercase().ends_with("_proxy");
@@ -742,7 +744,7 @@ fn publish_creates_release_and_uploads_assets_on_mock_api() {
     assert!(out.status.success(), "{all}");
     assert!(!all.contains(token), "token leaked into output");
     assert!(
-        all.contains("release: https://github.example/o/r/releases/tag/v0.3.1"),
+        all.contains("url=https://github.example/o/r/releases/tag/v0.3.1"),
         "{all}"
     );
 

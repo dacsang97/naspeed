@@ -42,6 +42,7 @@ impl Project {
 
     fn init(&self, extra: &[&str]) -> Output {
         Command::new(NASPEED)
+            .env("NO_COLOR", "1")
             .args(["ci", "init"])
             .args(extra)
             .current_dir(&self.root)
@@ -148,7 +149,8 @@ fn all_workflows_pass_actionlint() {
         let text = ok(&p.init(&[]));
         for file in FILES {
             assert!(
-                text.contains(&format!("wrote {}", p.path(file).display())),
+                text.contains("wrote workflow")
+                    && text.contains(&format!("path={}", p.path(file).display())),
                 "{text}"
             );
         }

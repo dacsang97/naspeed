@@ -27,6 +27,8 @@ impl Proj {
 
     fn ns_test(&self, args: &[&str]) -> Output {
         let mut cmd = Command::new(NASPEED);
+        // Plain log lines: tests match on their text.
+        cmd.env("NO_COLOR", "1");
         for (k, _) in std::env::vars_os() {
             let k = k.to_string_lossy();
             if (k.starts_with("CARGO_") && k != "CARGO_HOME")

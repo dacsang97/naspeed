@@ -67,9 +67,9 @@ pub fn serve(settings: &Settings, args: CacheServeArgs) -> Result<u8> {
         None => SocketAddr::new(peer_server::tailscale_ipv4()?, args.port),
     };
     if listen.ip().is_unspecified() && token.is_none() {
-        eprintln!(
-            "warning: {listen} without a token lets every network this machine is on read the store"
-        );
+        crate::ui_warn!(format!(
+            "{listen} without a token lets every network this machine is on read the store"
+        ));
     }
     let root = store.root.clone();
     let server = peer_server::start(
@@ -80,25 +80,15 @@ pub fn serve(settings: &Settings, args: CacheServeArgs) -> Result<u8> {
             allow_push: args.allow_push,
         },
     )?;
-    println!(
-        "serving {} on http://{} ({}, {})",
-        root.display(),
-        server.addr,
-        if args.allow_push {
-            "push allowed"
-        } else {
-            "read-only"
-        },
-        if token.is_some() {
-            "token required"
-        } else {
-            "no token"
-        }
-    );
-    println!(
-        "peers use it with: remotes = [\"http://{}\"] in ~/.config/naspeed/config.toml (or NASPEED_REMOTES)",
+    crate::ui_info!("serving store";
+        path = root.display(), url = format!("http://{}", server.addr),
+        push = if args.allow_push { "allowed" } else { "read-only" },
+        token = if token.is_some() { "required" } else { "none" });
+    let _hint = crate::ui::indent();
+    crate::ui_info!(format!(
+        "peers use it with remotes = [\"http://{}\"] in ~/.config/naspeed/config.toml (or NASPEED_REMOTES)",
         server.addr
-    );
+    ));
     server.wait();
     Ok(0)
 }
@@ -158,10 +148,7 @@ pub fn push(settings: &Settings, args: CachePushArgs) -> Result<u8> {
             None => skipped += 1,
         }
     }
-    println!(
-        "pushed {sent} entries ({}) to {}; {skipped} already there",
-        human(bytes),
-        args.url
-    );
+    crate::ui_info!(format!("pushed {sent} entries");
+        size = human(bytes), url = args.url, already_there = skipped);
     Ok(0)
 }
