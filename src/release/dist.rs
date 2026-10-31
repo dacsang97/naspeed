@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 
 /// Marker proving a directory was produced by `ns release` and may be wiped.
 pub const MARKER: &str = ".ns-dist";
+/// Makes the output dir ignore itself, so `dist/` never shows up in
+/// `git status` and no project `.gitignore` needs editing.
+pub const GITIGNORE: &str = ".gitignore";
 pub const METADATA: &str = "metadata.json";
 
 /// Empty `dir` (creating it if needed) and write the marker. A non-empty
@@ -30,7 +33,12 @@ pub fn prepare(dir: &Path) -> Result<()> {
     }
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     std::fs::write(dir.join(MARKER), "produced by ns release; safe to delete\n")
-        .with_context(|| format!("write {}", dir.join(MARKER).display()))
+        .with_context(|| format!("write {}", dir.join(MARKER).display()))?;
+    std::fs::write(
+        dir.join(GITIGNORE),
+        "# Written by ns release: release output, never committed.\n*\n",
+    )
+    .with_context(|| format!("write {}", dir.join(GITIGNORE).display()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +99,12 @@ mod tests {
         prepare(&dist).unwrap();
         assert!(!dist.join("old.tar.gz").exists());
         assert!(dist.join(MARKER).is_file());
+        assert!(
+            std::fs::read_to_string(dist.join(GITIGNORE))
+                .unwrap()
+                .lines()
+                .any(|l| l == "*")
+        );
 
         let foreign = root.path().join("foreign");
         std::fs::create_dir(&foreign).unwrap();
@@ -101,6 +115,26 @@ mod tests {
         let empty = root.path().join("empty");
         std::fs::create_dir(&empty).unwrap();
         prepare(&empty).unwrap();
+    }
+
+    #[test]
+    fn dist_stays_out_of_git_status() {
+        let root = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(root.path())
+                .output()
+        };
+        let Ok(init) = git(&["init", "-q"]) else {
+            return; // no git on this machine
+        };
+        assert!(init.status.success());
+        let dist = root.path().join("dist");
+        prepare(&dist).unwrap();
+        std::fs::write(dist.join("app.tar.gz"), b"x").unwrap();
+        let status = git(&["status", "--porcelain", "--untracked-files=all"]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&status.stdout), "");
     }
 
     #[test]
