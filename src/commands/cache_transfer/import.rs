@@ -205,27 +205,18 @@ pub fn run(root: &Path, dir: &Path, cow_mode: CowMode) -> Result<()> {
     }
     tx.commit()?;
 
-    println!(
-        "imported {} entries into {} ({} objects copied, {}); {} entries already present, {} objects already present",
-        report.entries,
-        root.display(),
-        report.objects_copied,
-        human(report.bytes_copied),
-        report.entries_present,
-        report.objects_present
-    );
+    crate::ui_info!(format!("imported {} entries", report.entries);
+        objects_copied = report.objects_copied, size = human(report.bytes_copied),
+        already_present = report.entries_present);
     if report.invalid > 0 {
-        println!(
-            "  skipped {} invalid or incomplete entries from {}",
-            report.invalid,
-            dir.display()
-        );
+        crate::ui_warn!(format!("skipped {} invalid or incomplete entries", report.invalid);
+            dir = dir.display());
     }
     if report.memo > 0 {
-        println!("  {} memo files added", report.memo);
+        crate::ui_info!(format!("added {} memo files", report.memo));
     }
     if test_results > 0 {
-        println!("  {test_results} cached test results added");
+        crate::ui_info!(format!("added {test_results} cached test results"));
     }
     Ok(())
 }

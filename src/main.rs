@@ -34,7 +34,7 @@ fn main() -> ExitCode {
     match naspeed::cli::run(args) {
         Ok(code) => ExitCode::from(code),
         Err(err) => {
-            eprintln!("naspeed: {err:#}");
+            naspeed::ui_error!(format!("{err:#}"));
             ExitCode::from(1)
         }
     }

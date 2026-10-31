@@ -76,7 +76,7 @@ pub fn resolve_platforms(
                 .map(|(_, path)| (path.clone(), None, None))
         };
         let Some((path, target, sha256)) = found else {
-            eprintln!("ns image: no {bin} binary for {platform}; skipping that platform");
+            crate::ui_warn!("no binary for this platform; skipping it"; binary = bin, platform = platform);
             continue;
         };
         let binary = read_verified(&path, sha256.as_deref())?;

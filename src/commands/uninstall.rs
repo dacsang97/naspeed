@@ -13,6 +13,8 @@ pub fn run(args: UninstallArgs) -> Result<u8> {
     let config_dir = &settings.config_dir;
     let cfg_path = cargo_config_path();
 
+    crate::ui_info!("uninstalling naspeed");
+    let _uninstall = crate::ui::indent();
     match cargo_config::load_state(config_dir) {
         Some(state) => {
             let (text, mut doc) = cargo_config::read_config(&cfg_path)?;
@@ -20,21 +22,21 @@ pub fn run(args: UninstallArgs) -> Result<u8> {
                 == Some(blake3::hash(text.as_bytes()).to_hex().as_str());
             if untouched_since_setup && !state.config_existed {
                 let _ = std::fs::remove_file(&cfg_path);
-                println!(
-                    "removed {} (it did not exist before setup)",
-                    cfg_path.display()
-                );
+                crate::ui_info!("cargo config removed (it did not exist before setup)";
+                    path = cfg_path.display());
             } else if untouched_since_setup && let Some(first) = &state.first_backup {
                 // Nothing changed after setup: the backup is the exact original.
                 std::fs::copy(first, &cfg_path)
                     .with_context(|| format!("restore {}", first.display()))?;
-                println!("restored {} from {}", cfg_path.display(), first.display());
+                crate::ui_info!("cargo config restored";
+                    path = cfg_path.display(), from = first.display());
             } else {
                 let kept = cargo_config::revert(&mut doc, &state)?;
                 std::fs::write(&cfg_path, doc.to_string())?;
-                println!("reverted naspeed keys in {}", cfg_path.display());
+                crate::ui_info!("naspeed keys reverted"; path = cfg_path.display());
+                let _kept = crate::ui::indent();
                 for path in kept {
-                    println!("  kept {} (changed after setup)", path.join("."));
+                    crate::ui_warn!("kept (changed after setup)"; key = path.join("."));
                 }
             }
             for shim in &state.shims {
@@ -51,24 +53,21 @@ pub fn run(args: UninstallArgs) -> Result<u8> {
                 );
             }
             std::fs::copy(&first, &cfg_path)?;
-            println!(
-                "setup state missing; restored {} from {}",
-                cfg_path.display(),
-                first.display()
-            );
+            crate::ui_warn!("setup state missing; cargo config restored from the first backup";
+                path = cfg_path.display(), from = first.display());
         }
     }
 
     let alias = crate::setup::ns_alias();
     if crate::setup::is_our_ns_alias(&alias) {
         std::fs::remove_file(&alias)?;
-        println!("removed {}", alias.display());
+        crate::ui_info!("ns alias removed"; path = alias.display());
     }
 
     let bin = installed_binary();
     if bin.exists() {
         std::fs::remove_file(&bin)?;
-        println!("removed {}", bin.display());
+        crate::ui_info!("binary removed"; path = bin.display());
     }
 
     if args.purge {
@@ -76,19 +75,16 @@ pub fn run(args: UninstallArgs) -> Result<u8> {
             if store.join("objects").is_dir() && store.join("entries").is_dir() {
                 std::fs::remove_dir_all(store)
                     .with_context(|| format!("remove store {}", store.display()))?;
-                println!("removed store {}", store.display());
+                crate::ui_info!("store removed"; path = store.display());
             }
         }
     } else {
         for store in &settings.stores {
-            println!(
-                "store kept at {} (uninstall --purge removes it)",
-                store.display()
-            );
+            crate::ui_info!("store kept (uninstall --purge removes it)"; path = store.display());
         }
     }
-    println!(
-        "Artifacts naspeed placed into target dirs stay valid. To drop them: `naspeed purge --target <dir>` (before uninstalling) or `cargo clean`."
+    crate::ui_info!(
+        "artifacts naspeed placed into target dirs stay valid; drop them with `naspeed purge --target <dir>` (before uninstalling) or `cargo clean`"
     );
     Ok(0)
 }

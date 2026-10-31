@@ -123,7 +123,7 @@ fn universal2(args: &BuildArgs) -> Result<u8> {
             bail!("lipo failed for {name}");
         }
         made += 1;
-        println!("universal2: {}", out.join(&name).display());
+        crate::ui_info!("universal2 binary"; path = out.join(&name).display());
     }
     if made == 0 {
         bail!("no executables or libraries found in {}", dirs[0].display());
@@ -201,13 +201,9 @@ fn pinned_glibc(args: &BuildArgs, triple: &str, glibc: &str) -> Result<u8> {
         envs.push(("CARGO_TARGET_APPLIES_TO_HOST".into(), "false".into()));
     }
     run_cargo(triple, &args.cargo_args, &envs)?;
-    println!(
-        "glibc {glibc}: artifacts in {}",
-        target_dir
-            .join(triple)
-            .join(profile_dir_name(&args.cargo_args))
-            .display()
-    );
+    crate::ui_info!("built";
+        glibc = glibc,
+        artifacts = target_dir.join(triple).join(profile_dir_name(&args.cargo_args)).display());
     Ok(0)
 }
 

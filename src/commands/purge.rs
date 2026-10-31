@@ -79,16 +79,10 @@ pub fn run(args: PurgeArgs) -> Result<u8> {
             }
         }
     }
-    println!(
-        "{} {files} restored files ({}) and {fingerprints} fingerprints under {}",
-        if args.dry_run {
-            "would remove"
-        } else {
-            "removed"
-        },
-        human(bytes),
-        args.target.display()
-    );
+    crate::ui_info!(
+        if args.dry_run { "would remove restored files" } else { "removed restored files" };
+        files = files, size = human(bytes), fingerprints = fingerprints,
+        target = args.target.display());
     Ok(0)
 }
 

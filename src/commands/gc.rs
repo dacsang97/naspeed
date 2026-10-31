@@ -21,11 +21,12 @@ pub fn run(args: GcArgs) -> Result<u8> {
     let verb = if args.dry_run { "would free" } else { "freed" };
     for root in &settings.stores {
         if !root.is_dir() {
-            println!("store {} missing, skipped", root.display());
+            crate::ui_warn!("store missing, skipped"; path = root.display());
             continue;
         }
         let store = Store::open(root, settings.cow_mode)?;
-        println!("store {}", root.display());
+        crate::ui_info!("store"; path = root.display());
+        let _store = crate::ui::indent();
         let lock = store.exclusive_lock()?;
         let mut conn = usage_log::open_index(root)?;
         usage_log::merge(root, &mut conn)?;
@@ -37,16 +38,13 @@ pub fn run(args: GcArgs) -> Result<u8> {
             let max_age =
                 (age_days > 0.0).then(|| std::time::Duration::from_secs_f64(age_days * 86_400.0));
             let r = store_lru::run(&store, cap, max_age, args.dry_run, store_lru::GRACE)?;
-            println!(
-                "  store: {} entries ({}) before; {} entries and {} objects removed, {verb} {} logical (cap {cap_gb} GB, unused > {age_days} days)",
-                r.entries_before,
-                human(r.bytes_before),
-                r.entries_removed,
-                r.objects_removed,
-                human(r.bytes_freed)
-            );
-            println!(
-                "  note : blocks still cloned into target/ dirs stay allocated until those files go too"
+            crate::ui_info!(format!("trimmed the store, {verb} {} logical", human(r.bytes_freed));
+                entries_before = r.entries_before, size_before = human(r.bytes_before),
+                entries_removed = r.entries_removed, objects_removed = r.objects_removed,
+                cap = format!("{cap_gb}GB"), max_age = format!("{age_days}d"));
+            let _note = crate::ui::indent();
+            crate::ui_info!(
+                "blocks still cloned into target/ dirs stay allocated until those files go too"
             );
         }
         // Target-dir work does not need the store lock; release it so builds
@@ -69,7 +67,10 @@ pub fn run(args: GcArgs) -> Result<u8> {
                     params![t.to_string_lossy()],
                 )?;
             }
-            println!("  forgot {} target dirs that no longer exist", gone.len());
+            crate::ui_info!(format!(
+                "forgot {} target dirs that no longer exist",
+                gone.len()
+            ));
         }
 
         let mut locked: Vec<(PathBuf, Vec<_>)> = Vec::new();
@@ -82,7 +83,9 @@ pub fn run(args: GcArgs) -> Result<u8> {
                 }
             }
             if busy > 0 {
-                println!("  skipped {busy} profile dirs that cargo is using right now");
+                crate::ui_warn!(format!(
+                    "skipped {busy} profile dirs that cargo is using right now"
+                ));
             }
         }
 
@@ -91,26 +94,18 @@ pub fn run(args: GcArgs) -> Result<u8> {
             for (profile, _) in &locked {
                 total.add(&target_sweep::sweep_profile(profile, args.dry_run)?);
             }
-            println!(
-                "  targets: {} of {} units stale, {} incremental sessions; {verb} {}",
-                total.units_removed,
-                total.units_total,
-                total.incremental_sessions_removed,
-                human(total.bytes_freed)
-            );
+            crate::ui_info!(format!("swept target dirs, {verb} {}", human(total.bytes_freed));
+                stale_units = format!("{}/{}", total.units_removed, total.units_total),
+                incremental_sessions = total.incremental_sessions_removed);
         }
         if args.dedup {
             let dirs: Vec<PathBuf> = locked.iter().map(|(p, _)| p.clone()).collect();
             if dirs.first().is_some_and(|d| !cow_copy::supports_clone(d)) {
-                println!("  dedup: volume does not support clones, skipped");
+                crate::ui_warn!("dedup skipped: the volume does not support clones");
             } else {
                 let s = target_dedup::dedup(&dirs, args.dry_run)?;
-                println!(
-                    "  dedup: {} duplicate files ≥ 64 KiB, {} replaced; {verb} {}",
-                    s.candidates,
-                    s.replaced,
-                    human(s.bytes_freed)
-                );
+                crate::ui_info!(format!("deduplicated target dirs, {verb} {}", human(s.bytes_freed));
+                    duplicates_64k_plus = s.candidates, replaced = s.replaced);
             }
         }
     }

@@ -135,14 +135,16 @@ pub fn run(args: ReleaseArgs) -> Result<u8> {
     };
 
     dist::prepare(&dist_dir)?;
-    println!(
-        "ns release: {project_name} {} for {}",
-        version.version,
-        targets.join(", ")
-    );
+    let release_start = std::time::Instant::now();
+    crate::ui_info!("starting release";
+        project = project_name, version = version.version, targets = targets.join(","));
+    let _release = crate::ui::indent();
     let env = build_plan::base_env(&version.version, tag, state.commit.as_deref(), sde);
     build_plan::run_hooks(&cfg.before, &graph.root, &env)?;
     let manifest_path = graph.root.join("Cargo.toml");
+    let build_start = std::time::Instant::now();
+    crate::ui_info!("building binaries");
+    let building = crate::ui::indent();
     target_matrix::build_all(
         &target_matrix::MatrixInput {
             manifest_path: manifest_path.clone(),
@@ -155,6 +157,8 @@ pub fn run(args: ReleaseArgs) -> Result<u8> {
         &targets,
         usize::from(args.jobs),
     )?;
+    crate::ui::took(build_start);
+    drop(building);
 
     let package::Packaged {
         mut artifacts,
@@ -205,7 +209,7 @@ pub fn run(args: ReleaseArgs) -> Result<u8> {
         cosign::find_on_path("cosign"),
         &has_env,
     )? {
-        cosign::Decision::Skip(reason) => println!("signing skipped: {reason}"),
+        cosign::Decision::Skip(reason) => crate::ui_info!(format!("signing skipped: {reason}")),
         cosign::Decision::Sign(bin) => {
             let (sig, pem) = cosign::sign_blob(&bin, &sums_path)?;
             for p in [sig, pem] {
@@ -237,13 +241,13 @@ pub fn run(args: ReleaseArgs) -> Result<u8> {
         artifacts,
     }
     .write(&dist_dir)?;
-    for file in &uploads {
-        println!(
-            "  {}",
-            file.file_name().unwrap_or_default().to_string_lossy()
-        );
+    crate::ui_info!("artifacts"; dir = dist_dir.display());
+    {
+        let _files = crate::ui::indent();
+        for file in &uploads {
+            crate::ui_info!(file.file_name().unwrap_or_default().to_string_lossy());
+        }
     }
-    println!("ns release: artifacts in {}", dist_dir.display());
 
     if let Some(plan) = publish {
         let options = publish::ReleaseOptions {
@@ -254,5 +258,6 @@ pub fn run(args: ReleaseArgs) -> Result<u8> {
         };
         publish::publish(&plan, &options, &graph.root, &uploads)?;
     }
+    crate::ui::took(release_start);
     Ok(0)
 }

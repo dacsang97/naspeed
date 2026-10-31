@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Settings;
 use crate::project::Project;
-use crate::store::usage_log::Record;
+use crate::store::usage_log::{self, Record};
 use crate::store::{Store, now_secs, volume_root};
 use crate::wrapper::execute::run_teed;
 use crate::wrapper::{current_env, exit_code};
@@ -122,7 +122,9 @@ pub fn cargo_test_command(
             .as_ref()
             .is_some_and(|c| c.runner(t.as_str()).ok().flatten().is_some());
         if own_runner {
-            eprintln!("naspeed: {t} has its own target runner; its tests run uncached");
+            crate::ui_warn!(format!(
+                "{t} has its own target runner; its tests run uncached"
+            ));
         } else {
             cmd.arg("--config").arg(runner_config(t, &exe)?);
         }
@@ -140,15 +142,50 @@ impl Drop for PlanFile {
     }
 }
 
+/// Build and test counters of the store serving the project's target dir.
+fn store_totals(project: &Project) -> Option<usage_log::Totals> {
+    let settings = Settings::load();
+    let root = volume_root::existing_ancestor(&project.graph.target_dir)
+        .and_then(|dir| volume_root::store_for(dir, &settings.stores))?;
+    let conn = usage_log::open_index(&root).ok()?;
+    // Two days, so a run across midnight still diffs the same window.
+    usage_log::totals(&root, &conn, 2).ok()
+}
+
 pub fn run(args: TestArgs) -> Result<u8> {
     let project = Project::load_cwd()?;
     let (mut cmd, plan) = cargo_test_command(&project, args.no_cache, &args.cargo_args)?;
+    let shown: Vec<String> = args
+        .cargo_args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    crate::ui_info!("running cargo test"; args = shown.join(" "));
+    let start = Instant::now();
+    let before = store_totals(&project);
+    // The test runners cargo starts print `(cached)` lines one level deeper.
     let status = cmd
         .args(&args.cargo_args)
+        .env(crate::ui::INDENT_ENV, (crate::ui::depth() + 1).to_string())
         .status()
         .context("run cargo test")?;
     drop(plan);
-    Ok(exit_code(status).clamp(0, 255) as u8)
+    let code = exit_code(status);
+    if code == 0 {
+        crate::ui_info!("cargo test passed");
+    } else {
+        crate::ui_error!("cargo test failed"; exit_code = code);
+    }
+    // What this run did, from the store's counters before and after.
+    if let (Some(b), Some(a)) = (before, store_totals(&project)) {
+        let _run = crate::ui::indent();
+        crate::ui_info!("rustc"; hits = a.hits.saturating_sub(b.hits),
+            misses = a.misses.saturating_sub(b.misses));
+        crate::ui_info!("tests"; replayed = a.test_hits.saturating_sub(b.test_hits),
+            ran = a.test_runs.saturating_sub(b.test_runs));
+        crate::ui::took(start);
+    }
+    Ok(code.clamp(0, 255) as u8)
 }
 
 fn passthrough(binary: &Path, args: &[OsString]) -> i32 {
@@ -208,8 +245,14 @@ fn try_cached_run(binary: &Path, args: &[OsString]) -> Option<i32> {
         let _ = err.write_all(result.stderr.as_bytes());
         let _ = writeln!(
             err,
-            "naspeed: (cached) {name}: unchanged since a passing run ({}), not re-run",
-            crate::commands::stats::human_ms(result.run_ms)
+            "{}",
+            crate::ui::format_line(
+                crate::ui::depth(),
+                crate::ui::Level::Info,
+                &format!("(cached) {name}: unchanged since a passing run, not re-run"),
+                &[("took", &crate::commands::stats::human_ms(result.run_ms))],
+                crate::ui::color_enabled(),
+            )
         );
         // mtime is the result's last use for gc.
         let _ = filetime::set_file_mtime(&path, filetime::FileTime::now());
@@ -224,7 +267,7 @@ fn try_cached_run(binary: &Path, args: &[OsString]) -> Option<i32> {
 
     let started = Instant::now();
     let output = run_teed(binary, args)
-        .inspect_err(|e| eprintln!("naspeed: failed to run {}: {e:#}", binary.display()))
+        .inspect_err(|e| crate::ui_error!(format!("failed to run {}: {e:#}", binary.display())))
         .ok()?;
     let run_ms = started.elapsed().as_millis() as u64;
     let code = exit_code(output.status);

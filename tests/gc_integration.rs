@@ -70,7 +70,7 @@ fn targets_sweep_removes_old_feature_variant_only() {
     // Features change the lib, build-script compile and run units: 2 × 3.
     assert_eq!(units(&profile, "greeting"), 6);
     let out = sb.naspeed(&["gc", "--targets"]);
-    assert!(out.contains("targets:"), "{out}");
+    assert!(out.contains("swept target dirs"), "{out}");
     assert_eq!(units(&profile, "greeting"), 3, "{out}");
     fresh(&sb, "t", &["--features", "greeting/loud"]);
 }
@@ -117,11 +117,11 @@ fn age_trim_evicts_unused_entries_under_the_cap() {
     sb.run("t1", &["build"]);
     // Far under the size cap, nothing is old: nothing goes.
     let out = sb.naspeed(&["gc", "--max-age-days", "14"]);
-    assert!(out.contains(" 0 entries and"), "{out}");
+    assert!(out.contains("entries_removed=0 "), "{out}");
     // Everything counts as unused once the limit is (almost) zero.
     std::thread::sleep(std::time::Duration::from_secs(2));
     let out = sb.naspeed(&["gc", "--max-age-days", "0.00001"]);
-    assert!(!out.contains(" 0 entries and"), "{out}");
+    assert!(!out.contains("entries_removed=0 "), "{out}");
     let entries = naspeed::store::physical_usage::tree_usage(&sb.store.join("entries"));
     assert_eq!(entries.files, 0, "{out}");
     // Builds still work from an empty store.

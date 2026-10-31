@@ -209,25 +209,17 @@ pub fn run(root: &Path, dir: &Path, cap: u64, cow_mode: CowMode) -> Result<()> {
     let (test_results, pruned_tests) = mirror_tests(&store, &out)?;
     report.pruned += pruned_tests;
 
-    println!(
-        "exported {} entries ({} objects, {}) from {} to {}",
-        report.entries,
-        objects.len(),
-        human(report.object_bytes),
-        root.display(),
-        dir.display()
-    );
-    println!(
-        "  copied {} objects ({}), {} already there, {} stale files pruned, {} entries over the {} cap or incomplete",
-        report.objects_copied,
-        human(report.bytes_copied),
-        report.objects_kept,
-        report.pruned,
-        report.entries_skipped,
-        human(cap)
-    );
+    crate::ui_info!(format!("exported {} entries", report.entries);
+        objects = objects.len(), size = human(report.object_bytes));
+    crate::ui_info!(format!("copied {} objects", report.objects_copied);
+        size = human(report.bytes_copied), already_there = report.objects_kept,
+        pruned = report.pruned);
+    if report.entries_skipped > 0 {
+        crate::ui_info!(format!("skipped {} entries over the cap or incomplete", report.entries_skipped);
+            cap = human(cap));
+    }
     if test_results > 0 {
-        println!("  {test_results} cached test results");
+        crate::ui_info!(format!("exported {test_results} cached test results"));
     }
     Ok(())
 }

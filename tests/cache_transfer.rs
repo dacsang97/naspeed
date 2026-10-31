@@ -35,6 +35,7 @@ fn bytes_under(dir: &Path) -> u64 {
 /// `naspeed cache ...` against an explicit store.
 fn cache_cmd(sb: &Sandbox, store: &Path, args: &[&str]) -> String {
     let out = Command::new(NASPEED)
+        .env("NO_COLOR", "1")
         .arg("cache")
         .args(args)
         .env("NASPEED_CONFIG_DIR", &sb.config)

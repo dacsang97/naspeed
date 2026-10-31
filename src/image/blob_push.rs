@@ -127,15 +127,12 @@ pub fn push(
     let client = clients.get(&target.registry)?;
     for tag in tags {
         client.put_manifest(repo, tag, OCI_INDEX, index)?;
-        eprintln!("ns image: pushed {}/{repo}:{tag}", target.registry);
+        crate::ui_info!("pushed"; tag = format!("{}/{repo}:{tag}", target.registry));
     }
     if tags.is_empty() {
         // e.g. a snapshot with tags = ["{tag}", "latest"]: reachable by digest only.
         let digest = client.put_manifest(repo, &sha256_digest(index), OCI_INDEX, index)?;
-        eprintln!(
-            "ns image: pushed {}/{repo}@{digest} (no tags)",
-            target.registry
-        );
+        crate::ui_info!("pushed (no tags)"; digest = format!("{}/{repo}@{digest}", target.registry));
     }
     Ok(stats)
 }
@@ -199,12 +196,8 @@ fn cached_blob(
     }
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let (tmp_path, mut file) = tempfile_in(&dir)?;
-    eprintln!(
-        "ns image: fetching base layer {} ({} bytes) from {}",
-        layer.digest,
-        layer.size,
-        client.registry()
-    );
+    crate::ui_info!("fetching base layer";
+        digest = layer.digest, bytes = layer.size, registry = client.registry());
     let fetched = client
         .get_blob_into(repo, &layer.digest, &mut file, layer.size.saturating_add(1))
         .and_then(|_| file.sync_all().context("flush cached blob"))
