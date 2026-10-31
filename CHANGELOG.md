@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/dacsang97/naspeed/compare/v0.2.0...v0.3.0) - 2026-10-31
+
+### Added
+
+- *(test)* track test inputs at run time and close dependency gaps ([#12](https://github.com/dacsang97/naspeed/pull/12))
+- *(release)* make dist/ ignore itself ([#13](https://github.com/dacsang97/naspeed/pull/13))
+
+### Other
+
+- add GitHub Actions and AI agents guides ([#10](https://github.com/dacsang97/naspeed/pull/10))
+
 ## [0.2.0](https://github.com/dacsang97/naspeed/compare/v0.1.2...v0.2.0) - 2026-10-31
 
 ### Added
