@@ -3,6 +3,7 @@
 pub mod build;
 pub mod cache_peer;
 pub mod cache_transfer;
+pub mod check;
 pub mod gc;
 pub mod purge;
 pub mod setup;
