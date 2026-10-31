@@ -1,8 +1,8 @@
 name: ci
 
+# Pull requests only: a push trigger would run CI twice for every PR branch.
+# release.yml calls this for main and dispatches it for the Release PR.
 on:
-  push:
-    branches-ignore: [main]
   pull_request:
   workflow_dispatch:
   workflow_call:
