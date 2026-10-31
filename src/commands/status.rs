@@ -176,6 +176,8 @@ fn doctor() -> Result<u8> {
         .args(["build", "-v", "--offline"])
         .current_dir(&dir)
         .env("CARGO_TARGET_DIR", dir.join("target"))
+        // Colored output puts escape codes between `Running` and the command.
+        .env("CARGO_TERM_COLOR", "never")
         .output();
     let _ = std::fs::remove_dir_all(&dir);
     let out = out?;
