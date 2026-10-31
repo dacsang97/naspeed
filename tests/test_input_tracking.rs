@@ -22,9 +22,9 @@ fn write(path: &Path, text: &str) {
 fn workspace(root: &Path) {
     write(
         &root.join("Cargo.toml"),
-        "[workspace]\nresolver = \"2\"\nmembers = [\"core\", \"app\", \"tool\"]\n",
+        "[workspace]\nresolver = \"2\"\nmembers = [\"core\", \"app\", \"tool\", \"sys\"]\n",
     );
-    for name in ["core", "tool"] {
+    for name in ["core", "tool", "sys"] {
         write(
             &root.join(format!("{name}/Cargo.toml")),
             &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
@@ -40,6 +40,23 @@ fn workspace(root: &Path) {
         "fn main() { println!(\"tool-v1\"); }\n",
     );
     write(&root.join("shared/value.txt"), "shared-v1\n");
+    // A system binary started from a traced test must run: it is arm64e on
+    // Apple silicon, and with SIP off the tracer must not be inserted into it.
+    write(
+        &root.join("sys/src/lib.rs"),
+        r#"#[test]
+fn system_binaries_run() {
+    let out = std::process::Command::new("/usr/bin/env").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let env = String::from_utf8_lossy(&out.stdout);
+    if cfg!(target_os = "macos") {
+        assert!(!env.contains("DYLD_INSERT_LIBRARIES="), "{env}");
+    }
+    let out = std::process::Command::new("cp").arg("--version").output().unwrap();
+    assert!(out.status.code().is_some(), "{out:?}");
+}
+"#,
+    );
     write(
         &root.join("app/Cargo.toml"),
         "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ncore = { path = \"../core\" }\n",
@@ -215,6 +232,23 @@ fn every_dependency_change_reruns(traced: bool) {
     // A workspace file no test reads: only the tracer knows that.
     p.set("NOTES.md", "unrelated\n");
     assert_eq!(p.replays(), traced);
+}
+
+#[test]
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+fn traced_tests_can_start_system_binaries() {
+    let p = Probe::new("tracesys", true);
+    let out = p
+        .command(NASPEED)
+        .args(["test", "-p", "sys", "--offline"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]

@@ -42,26 +42,21 @@ fn main() {
     let override_cc = std::env::var("NASPEED_TRACE_CC").ok();
     let built = match os.as_str() {
         "macos" => {
-            let cc = override_cc.unwrap_or_else(|| "cc".into());
-            let arch = if arch == "aarch64" {
-                "arm64"
-            } else {
-                arch.as_str()
+            // Universal by default: a traced test may start an x86_64 child
+            // under Rosetta, and the variable reaches it too. An override
+            // compiler builds just the target arch.
+            let archs: Vec<&str> = match &override_cc {
+                Some(_) if arch == "aarch64" => vec!["arm64"],
+                Some(_) => vec![arch.as_str()],
+                None => vec!["arm64", "x86_64"],
             };
-            compile(
-                Command::new(cc)
-                    .args([
-                        "-dynamiclib",
-                        "-O1",
-                        "-arch",
-                        arch,
-                        "-mmacosx-version-min=11.0",
-                    ])
-                    .arg("-o")
-                    .arg(&lib)
-                    .arg(src),
-                &lib,
-            )
+            let cc = override_cc.clone().unwrap_or_else(|| "cc".into());
+            let mut cmd = Command::new(cc);
+            cmd.args(["-dynamiclib", "-O1", "-mmacosx-version-min=11.0"]);
+            for a in &archs {
+                cmd.args(["-arch", a]);
+            }
+            compile(cmd.arg("-o").arg(&lib).arg(src), &lib)
         }
         "linux" => {
             let triple = format!("{arch}-linux-gnu");
