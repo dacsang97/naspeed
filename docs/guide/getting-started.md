@@ -14,10 +14,22 @@ slot pool also caps how many `rustc` run at once.
 
 ## Install and set up
 
+Install the binary with one of:
+
 ```sh
-cargo build --release
-./target/release/naspeed setup --store /Volumes/Work/.naspeed
+brew install dacsang97/tap/naspeed   # macOS / Linux, prebuilt
+cargo install naspeed --locked       # from crates.io
+cargo build --release                # from a checkout: ./target/release/naspeed
 ```
+
+Then point cargo at it:
+
+```sh
+naspeed setup --store /Volumes/Work/.naspeed
+```
+
+`setup` copies the binary into `~/.cargo/bin`, so after `brew upgrade naspeed`
+or a new `cargo install`, run `naspeed setup` again to refresh that copy.
 
 `setup` does the following:
 

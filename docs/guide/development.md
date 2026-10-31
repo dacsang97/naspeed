@@ -46,8 +46,32 @@ pnpm --dir docs run build   # static site in docs/.vitepress/
 
 | Workflow | Trigger | Jobs |
 |---|---|---|
-| `ci.yml` | push to `main`, pull requests | `cargo fmt --check` · `cargo clippy -D warnings` and `cargo check` on Linux and macOS |
+| `ci.yml` | pushes to non-`main` branches, pull requests, called by `release.yml` | `cargo fmt --check` · `cargo clippy -D warnings`, `cargo check` and unit tests (`--lib --bins`) on Linux and macOS · `cargo publish --dry-run` |
+| `release.yml` | push to `main` | `ci.yml`, then release-plz: open or update the Release PR; after it merges, publish to crates.io, tag `v<version>`, create the GitHub release and call `release-binaries.yml` |
+| `release-binaries.yml` | called by `release.yml`, or run by hand with an existing tag | build `naspeed-<tag>-<target>.tar.gz` for macOS (arm64, x86_64) and Linux musl (arm64, x86_64), attach them to the release, update `naspeed.rb` in `dacsang97/homebrew-tap` |
 | `docs.yml` | push to `main` touching `docs/**` | VitePress build → GitHub Pages |
+
+## Release
+
+Releases go through [release-plz](https://release-plz.dev/). Every push to
+`main` refreshes a Release PR that bumps the version in `Cargo.toml` and
+updates `CHANGELOG.md` from conventional commits. Merging that PR publishes the
+release; an ordinary commit never does. If the binaries or the Homebrew step
+fail, rerun `release-binaries.yml` from the Actions tab with the tag (for
+example `v0.1.0`).
+
+One-time repository setup:
+
+| Setting | Where | Purpose |
+|---|---|---|
+| `CRATES_IO_PUBLISH_ENABLED` = `true` | Actions variable | turns on the publish job |
+| `crates-io` | Environment | runs the publish job (add required reviewers here to gate releases) |
+| `CARGO_REGISTRY_TOKEN` | secret in the `crates-io` environment | crates.io token with `publish-new` and `publish-update`. The first publish needs it; afterwards you can set up crates.io trusted publishing for `release.yml` and delete it |
+| `HOMEBREW_TAP_TOKEN` | repository secret | fine-grained token with contents read/write on `dacsang97/homebrew-tap` |
+| Allow GitHub Actions to create and approve pull requests | Settings → Actions → General | lets release-plz open the Release PR |
+
+`scripts/homebrew_formula.sh <tag> <checksums-dir>` prints the formula the
+workflow commits, so a release's formula can be inspected locally.
 
 ## Project layout
 

@@ -5,8 +5,12 @@ edition = "2024"
 rust-version = "1.98"
 license = "Apache-2.0"
 repository = "https://github.com/dacsang97/naspeed"
+homepage = "https://dacsang97.github.io/naspeed/"
 description = "Transparent RUSTC_WRAPPER that caches registry crate artifacts once per volume and clones them copy-on-write into every target/ dir"
-publish = false
+readme = "README.md"
+keywords = ["cargo", "cache", "rustc-wrapper", "build", "copy-on-write"]
+categories = ["development-tools::build-utils", "development-tools::cargo-plugins", "caching"]
+include = ["/src/**", "/README.md", "/LICENSE", "/NOTICE"]
 
 [dependencies]
 anyhow = "1"
