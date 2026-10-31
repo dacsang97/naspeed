@@ -53,6 +53,11 @@ pub struct TestArgs {
     /// Say for every test binary why it replays or runs (which input changed).
     #[arg(long)]
     pub explain: bool,
+    /// Stop after the first failing test binary, as plain `cargo test` does.
+    /// By default every binary runs (replays are nearly free), so one run
+    /// reports every failure.
+    #[arg(long)]
+    pub fail_fast: bool,
     /// Write a JSON summary of the run (every binary: key parts, recorded
     /// inputs, replayed or ran and why) to `<target>/naspeed/test-runs/`.
     #[arg(long)]
@@ -205,7 +210,12 @@ pub fn run(args: TestArgs) -> Result<u8> {
     if args.explain {
         cmd.env(EXPLAIN_ENV, "1");
     }
-    let summary = if args.summarize && plan.is_some() {
+    if !args.fail_fast && !before_separator(&args.cargo_args).any(|a| a == "--no-fail-fast") {
+        cmd.arg("--no-fail-fast");
+    }
+    // The runners always report per binary; the lines feed the closing
+    // "why ran" line and, with --summarize, the run summary.
+    let summary = if plan.is_some() {
         let dir = project.graph.target_dir.join("naspeed").join("test-runs");
         std::fs::create_dir_all(&dir).context("create test-runs dir")?;
         let id = format!("{}-{}", now_secs(), std::process::id());
@@ -222,11 +232,18 @@ pub fn run(args: TestArgs) -> Result<u8> {
         .context("run cargo test")?;
     drop(plan);
     let code = exit_code(status);
-    if let Some((dir, id, lines)) = summary {
-        match write_summary(&dir, &id, &lines, &shown, code, start) {
-            Ok(path) => crate::ui_info!("run summary"; path = path.display()),
-            Err(e) => crate::ui_warn!(format!("run summary not written: {e:#}")),
+    let binaries = summary
+        .as_ref()
+        .map(|(_, _, lines)| read_lines(lines))
+        .unwrap_or_default();
+    if let Some((dir, id, lines)) = &summary {
+        if args.summarize {
+            match write_summary(dir, id, &binaries, &shown, code, start) {
+                Ok(path) => crate::ui_info!("run summary"; path = path.display()),
+                Err(e) => crate::ui_warn!(format!("run summary not written: {e:#}")),
+            }
         }
+        let _ = std::fs::remove_file(lines);
     }
     if code == 0 {
         crate::ui_info!("cargo test passed");
@@ -240,25 +257,85 @@ pub fn run(args: TestArgs) -> Result<u8> {
             misses = a.misses.saturating_sub(b.misses));
         crate::ui_info!("tests"; replayed = a.test_hits.saturating_sub(b.test_hits),
             ran = a.test_runs.saturating_sub(b.test_runs));
+        let why = why_ran(&binaries);
+        if !why.is_empty() {
+            let _why = crate::ui::indent();
+            crate::ui_info!("why ran"; reasons = why);
+        }
         crate::ui::took(start);
     }
     Ok(code.clamp(0, 255) as u8)
+}
+
+/// Cargo args before `--` (the rest belong to the test binaries).
+fn before_separator(args: &[OsString]) -> impl Iterator<Item = &OsString> {
+    args.iter().take_while(|a| *a != "--")
+}
+
+/// The runners' JSON lines, one per test binary.
+fn read_lines(path: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+/// The parts of a runner's reason, as short labels: `env:DATABASE_URL`,
+/// `dir:crates/core`, `file /repo/shared/x.toml`, `no earlier run`…
+fn reason_labels(why: &str) -> Vec<String> {
+    if let Some(parts) = why.strip_prefix("key changed: ") {
+        return parts
+            .split(", ")
+            .map(|p| p.trim_end_matches(" (gone)").to_owned())
+            .collect();
+    }
+    if why.starts_with("workspace files") {
+        return vec!["workspace files".into()];
+    }
+    if let Some(input) = why.strip_suffix(" changed") {
+        return vec![match input.strip_prefix("env ") {
+            Some(name) => format!("env:{name}"),
+            None => input.to_owned(),
+        }];
+    }
+    vec![why.to_owned()]
+}
+
+/// The most common reasons binaries ran, with counts, most frequent first.
+fn why_ran(binaries: &[serde_json::Value]) -> String {
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    for b in binaries.iter().filter(|b| b["status"] != "replayed") {
+        if let Some(why) = b["why"].as_str() {
+            for label in reason_labels(why) {
+                *counts.entry(label).or_default() += 1;
+            }
+        }
+    }
+    let mut counts: Vec<(String, usize)> = counts.into_iter().collect();
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let shown: Vec<String> = counts
+        .iter()
+        .take(3)
+        .map(|(label, n)| format!("{label} ({n})"))
+        .collect();
+    let rest = counts.len().saturating_sub(3);
+    if rest > 0 {
+        format!("{}, +{rest} more (ns test --explain)", shown.join(", "))
+    } else {
+        shown.join(", ")
+    }
 }
 
 /// Fold the runners' JSON lines into `<dir>/<id>.json`.
 fn write_summary(
     dir: &Path,
     id: &str,
-    lines: &Path,
+    binaries: &[serde_json::Value],
     args: &[String],
     exit_code: i32,
     start: Instant,
 ) -> Result<PathBuf> {
-    let text = std::fs::read_to_string(lines).unwrap_or_default();
-    let binaries: Vec<serde_json::Value> = text
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
     let count = |status: &str| binaries.iter().filter(|b| b["status"] == status).count();
     let saved: u64 = binaries
         .iter()
@@ -281,7 +358,6 @@ fn write_summary(
     let path = dir.join(format!("{id}.json"));
     std::fs::write(&path, serde_json::to_vec_pretty(&summary)?)
         .with_context(|| format!("write {}", path.display()))?;
-    let _ = std::fs::remove_file(lines);
     Ok(path)
 }
 
@@ -616,6 +692,37 @@ mod tests {
         .map(OsString::from)
         .collect();
         assert_eq!(targets(&args), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn reasons_become_counted_labels() {
+        assert_eq!(
+            reason_labels("key changed: env:DATABASE_URL, dir:crates/core"),
+            vec!["env:DATABASE_URL", "dir:crates/core"]
+        );
+        assert_eq!(
+            reason_labels("env TEST_DATABASE_URL changed"),
+            vec!["env:TEST_DATABASE_URL"]
+        );
+        assert_eq!(
+            reason_labels("file /r/shared/a.toml changed"),
+            vec!["file /r/shared/a.toml"]
+        );
+        let lines = |whys: &[&str]| -> Vec<serde_json::Value> {
+            whys.iter()
+                .map(|w| serde_json::json!({"status": "passed", "why": w}))
+                .chain(std::iter::once(serde_json::json!({"status": "replayed"})))
+                .collect()
+        };
+        assert_eq!(
+            why_ran(&lines(&[
+                "key changed: env:DATABASE_URL",
+                "key changed: env:DATABASE_URL, binary",
+                "no earlier run"
+            ])),
+            "env:DATABASE_URL (2), binary (1), no earlier run (1)"
+        );
+        assert_eq!(why_ran(&lines(&[])), "");
     }
 
     #[test]

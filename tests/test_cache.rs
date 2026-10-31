@@ -152,3 +152,23 @@ fn a_project_runner_is_kept_and_its_tests_run_uncached() {
     }
     assert_eq!(p.counts(), (0, 0));
 }
+
+#[test]
+fn a_failing_binary_does_not_stop_the_others_unless_fail_fast() {
+    let p = Proj::new("testcachenoff");
+    p.edit(
+        "crates/greeter/src/lib.rs",
+        "assert!(!super::greeting().is_empty());",
+        "assert!(super::greeting().is_empty(), \"deliberate failure\");",
+    );
+    // greeter's unit tests fail; hello-server's still run by default.
+    let out = p.ns_test(&["--offline"]);
+    assert!(!out.status.success());
+    let all = format!("{}{}", stderr(&out), String::from_utf8_lossy(&out.stdout));
+    assert!(all.contains("src/main.rs"), "hello-server skipped:\n{all}");
+
+    let out = p.ns_test(&["--fail-fast", "--offline"]);
+    assert!(!out.status.success());
+    let all = format!("{}{}", stderr(&out), String::from_utf8_lossy(&out.stdout));
+    assert!(!all.contains("Running unittests src/main.rs"), "{all}");
+}

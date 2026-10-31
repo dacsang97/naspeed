@@ -63,6 +63,19 @@ workspace file outside the packages, minus `[test].exclude`. That stays
 correct but re-runs on any such edit.
 `NASPEED_TEST_TRACE=0` or `[test].trace = false` turns tracing off.
 
+## Every failure in one run
+
+Plain `cargo test` stops after the first test binary that fails, so the
+binaries after it never run. `ns test` passes `--no-fail-fast`: binaries that
+passed before replay almost for free, so one run reports every failure.
+`ns test --fail-fast` keeps cargo's behaviour.
+
+The closing summary also names the most common reasons binaries ran, for
+example `why ran  reasons=env:DATABASE_URL (50), no earlier run (3)`. A run
+started from a Makefile that exports `.env` and a run from a bare shell see
+different environments, and this line makes that visible without
+`--explain`.
+
 ## Why a test ran: `--explain`
 
 ```sh
