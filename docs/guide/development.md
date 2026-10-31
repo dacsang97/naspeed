@@ -1,0 +1,71 @@
+# Development
+
+## Build and test
+
+```sh
+cargo build --release
+cargo test
+cargo fmt --all --check
+cargo clippy --locked --all-targets -- -D warnings
+```
+
+Integration tests live in `tests/` (setup/uninstall, materialize, gc, peer
+cache, test cache, release snapshot, local OCI registry, and others), with
+shared helpers in `tests/common` and fixture crates in `tests/fixtures`.
+
+## Linux
+
+```sh
+scripts/test_linux.sh copy    # store + target dirs on the bind mount (no reflink → copy mode)
+scripts/test_linux.sh btrfs   # same tests on a loop-mounted btrfs (reflink mode, needs --privileged)
+```
+
+Both run the suite in a `debian:bookworm-slim` container, with the toolchain
+and the container's target dirs under `target/linux-*`.
+
+## Measurement scripts
+
+| Script | Purpose |
+|---|---|
+| `scripts/measure_baseline.sh` | Disk usage and build time before and after naspeed (`env`, `sizes`, `warm`, `cold`, `parallel-ram`). Never runs `cargo clean` on a real project. |
+| `scripts/target_components.py` | Splits one `target/` dir into registry deps, workspace deps, incremental, build-script `OUT_DIR` and other. Run with `python3 -I`. |
+| `scripts/bench_copies.sh` | Benchmarks naspeed on copies of real projects, never the originals. |
+| `scripts/ci_simulate.sh` | Simulates two runs of the `ns ci init` workflow on fresh runners (Linux container, or `host`). |
+
+## Docs
+
+This site is built with VitePress from `docs/`:
+
+```sh
+pnpm --dir docs install
+pnpm --dir docs run dev     # local preview
+pnpm --dir docs run build   # static site in docs/.vitepress/
+```
+
+## CI
+
+| Workflow | Trigger | Jobs |
+|---|---|---|
+| `ci.yml` | push to `main`, pull requests | `cargo fmt --check` · `cargo clippy -D warnings` and `cargo check` on Linux and macOS |
+| `docs.yml` | push to `main` touching `docs/**` | VitePress build → GitHub Pages |
+
+## Project layout
+
+```
+src/wrapper      RUSTC_WRAPPER: cacheability, cache key, hit/miss, build-script runs, incremental warm-up
+src/store        content-addressed store, copy-on-write copies, key locks, usage log
+src/jobserver    machine-wide rustc slots and memory guard
+src/gc           store LRU, target sweep, dedup, daily auto gc
+src/setup        ~/.cargo/config.toml edits and shell env check
+src/commands     naspeed subcommands (status, stats, gc, purge, build, cache …)
+src/cross        zig linker shims and msvc SDK
+src/remote       peer cache client and server
+src/project      ns.toml and workspace graph
+src/dev          ns dev
+src/testcache    ns test result cache
+src/release      ns release
+src/image        ns image (OCI)
+src/ci           ns ci init
+tests/           integration tests
+docs/            this site (VitePress)
+```
