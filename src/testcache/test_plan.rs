@@ -22,6 +22,10 @@ pub struct PackageInputs {
     /// The package's binaries; integration tests run them through
     /// `CARGO_BIN_EXE_<name>`, so their content joins the key.
     pub bins: Vec<String>,
+    /// Environment variables named in the sources of `dirs`
+    /// (`env::var("X")`, `option_env!("X")`…); their values join the key.
+    #[serde(default)]
+    pub env_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -35,6 +39,51 @@ pub struct TestPlan {
     pub inputs: Vec<PathBuf>,
     /// Keyed by `CARGO_MANIFEST_DIR` (the package dir cargo runs tests in).
     pub packages: BTreeMap<PathBuf, PackageInputs>,
+    /// Every binary of the workspace: a test may run any of them.
+    #[serde(default)]
+    pub all_bins: Vec<String>,
+    /// Member dirs, left out of the workspace-root files hashed for runs
+    /// that could not be traced.
+    #[serde(default)]
+    pub member_dirs: Vec<PathBuf>,
+    /// `[test].exclude` globs for those workspace-root files.
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// Record runtime inputs with the tracer (`[test].trace`).
+    #[serde(default)]
+    pub trace: bool,
+}
+
+/// Uppercase variable names read through `env::var`, `var_os`,
+/// `option_env!`, `env!` or `dotenvy::var` in `.rs` files under `dirs`.
+/// Cargo's own build-time variables are left out: they are paths of this
+/// checkout, or already part of the key.
+pub fn env_names_in(dirs: &[PathBuf], target_dir: &Path) -> Vec<String> {
+    let re = regex::Regex::new(r#"\b(?:var|var_os|option_env!|env!)\s*\(\s*"([A-Z_][A-Z0-9_]*)""#)
+        .expect("static regex");
+    let mut names = BTreeSet::new();
+    for dir in dirs {
+        let target = target_dir.to_path_buf();
+        let walker = ignore::WalkBuilder::new(dir)
+            .require_git(false)
+            .filter_entry(move |e| !e.path().starts_with(&target))
+            .build();
+        for entry in walker.flatten() {
+            let p = entry.path();
+            if p.extension().is_none_or(|x| x != "rs") {
+                continue;
+            }
+            if let Ok(text) = std::fs::read_to_string(p) {
+                for cap in re.captures_iter(&text) {
+                    let name = &cap[1];
+                    if !name.starts_with("CARGO_") && !name.starts_with("NASPEED_") {
+                        names.insert(name.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    names.into_iter().collect()
 }
 
 impl TestPlan {
@@ -59,11 +108,13 @@ impl TestPlan {
                 .collect();
             dirs.sort();
             dirs.dedup();
+            let env_names = env_names_in(&dirs, &graph.target_dir);
             packages.insert(
                 member.dir.clone(),
                 PackageInputs {
                     dirs,
                     bins: member.bins.clone(),
+                    env_names,
                 },
             );
         }
@@ -90,6 +141,13 @@ impl TestPlan {
                 .iter()
                 .map(|p| graph.root.join(p)),
         );
+        let mut all_bins: Vec<String> = graph
+            .members
+            .iter()
+            .flat_map(|m| m.bins.iter().cloned())
+            .collect();
+        all_bins.sort();
+        all_bins.dedup();
         TestPlan {
             store: store.to_path_buf(),
             workspace_root: graph.root.clone(),
@@ -97,6 +155,15 @@ impl TestPlan {
             env: project.config.test.env.clone(),
             inputs,
             packages,
+            all_bins,
+            member_dirs: graph
+                .members
+                .iter()
+                .map(|m| m.dir.clone())
+                .filter(|d| *d != graph.root)
+                .collect(),
+            exclude: project.config.test.exclude.clone(),
+            trace: project.config.test.trace,
         }
     }
 

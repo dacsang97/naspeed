@@ -558,8 +558,18 @@ fn tee<R: Read + Send + 'static, W: Write>(src: R, mut dst: W) -> Vec<u8> {
 
 /// Run a program, forwarding each stdout/stderr line as soon as it is written.
 pub(crate) fn run_teed(program: &Path, args: &[OsString]) -> Result<TeedOutput> {
+    run_teed_env(program, args, &[])
+}
+
+/// `run_teed` with extra environment variables for the child.
+pub(crate) fn run_teed_env(
+    program: &Path,
+    args: &[OsString],
+    envs: &[(OsString, OsString)],
+) -> Result<TeedOutput> {
     let mut child = Command::new(program)
         .args(args)
+        .envs(envs.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

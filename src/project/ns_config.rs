@@ -29,6 +29,12 @@ pub struct TestConfig {
     /// Extra files or directories (relative to the workspace root) the
     /// tests read at run time, beyond the package and its workspace deps.
     pub inputs: Vec<PathBuf>,
+    /// Record what each test binary reads at run time (env, files, dirs,
+    /// executables) and replay a pass only while all of it is unchanged.
+    pub trace: bool,
+    /// Globs (relative to the workspace root) left out of the workspace
+    /// files hashed when a run could not be traced, e.g. `docs/**`.
+    pub exclude: Vec<String>,
 }
 
 impl Default for TestConfig {
@@ -37,6 +43,8 @@ impl Default for TestConfig {
             cache: true,
             env: Vec::new(),
             inputs: Vec::new(),
+            trace: true,
+            exclude: Vec::new(),
         }
     }
 }

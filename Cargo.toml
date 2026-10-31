@@ -10,7 +10,7 @@ description = "Transparent RUSTC_WRAPPER that caches registry crate artifacts on
 readme = "README.md"
 keywords = ["cargo", "cache", "rustc-wrapper", "build", "copy-on-write"]
 categories = ["development-tools::build-utils", "development-tools::cargo-plugins", "caching"]
-include = ["/src/**", "/README.md", "/LICENSE", "/NOTICE"]
+include = ["/src/**", "/trace/**", "/build.rs", "/README.md", "/LICENSE", "/NOTICE"]
 
 [dependencies]
 anyhow = "1"

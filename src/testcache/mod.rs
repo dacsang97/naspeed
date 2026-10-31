@@ -5,10 +5,19 @@
 //! `naspeed __test-run <binary> <args…>` with the package's env and cwd. The
 //! runner keys the run (see `test_key`) and either replays the stored output
 //! of an identical passing run or runs the binary and stores a pass.
+//!
+//! The key covers what naspeed can see up front (binary, args, declared and
+//! source-named env vars, package trees, workspace binaries). What a test
+//! reads at run time is recorded by the tracer (`trace`) and stored with
+//! the pass; the pass replays only while every recorded input is unchanged.
+//! A run the tracer could not follow falls back to hashing every workspace
+//! file outside the packages.
 //! Doctests run under rustdoc, not the runner, and always run.
 
+pub mod hash_memo;
 pub mod test_key;
 pub mod test_plan;
+pub mod trace;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -24,18 +33,30 @@ use crate::config::Settings;
 use crate::project::Project;
 use crate::store::usage_log::{self, Record};
 use crate::store::{Store, now_secs, volume_root};
-use crate::wrapper::execute::run_teed;
+use crate::wrapper::execute::run_teed_env;
 use crate::wrapper::{current_env, exit_code};
 use test_key::RunContext;
 use test_plan::{PLAN_ENV, TestPlan};
 
-pub const TEST_RESULT_VERSION: u32 = 1;
+pub const TEST_RESULT_VERSION: u32 = 2;
+
+/// Set by `ns test --explain` for the runners cargo starts.
+pub const EXPLAIN_ENV: &str = "NASPEED_TEST_EXPLAIN";
+/// Set by `ns test --summarize`: JSON lines file the runners append to.
+pub const SUMMARY_ENV: &str = "NASPEED_TEST_SUMMARY";
 
 #[derive(Debug, Args)]
 pub struct TestArgs {
     /// Run every test binary even when an identical run already passed.
     #[arg(long)]
     pub no_cache: bool,
+    /// Say for every test binary why it replays or runs (which input changed).
+    #[arg(long)]
+    pub explain: bool,
+    /// Write a JSON summary of the run (every binary: key parts, recorded
+    /// inputs, replayed or ran and why) to `<target>/naspeed/test-runs/`.
+    #[arg(long)]
+    pub summarize: bool,
     /// Arguments for `cargo test` (put test-binary arguments after `--`).
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub cargo_args: Vec<OsString>,
@@ -58,6 +79,23 @@ pub struct TestResult {
     pub stderr: String,
     pub run_ms: u64,
     pub created: u64,
+    /// What the passing run read, as the tracer recorded it.
+    #[serde(default)]
+    pub inputs: Option<Vec<trace::Input>>,
+    /// Untraced runs: hash of the workspace files outside the packages.
+    #[serde(default)]
+    pub workspace_files: Option<String>,
+    /// Labelled parts of the key (hashed), for `--explain`.
+    #[serde(default)]
+    pub components: Vec<(String, String)>,
+}
+
+/// The last key a test target ran under, so `--explain` can name the part
+/// of the key that changed when there is no stored pass for the new one.
+#[derive(Debug, Serialize, Deserialize)]
+struct LastRun {
+    key: String,
+    components: Vec<(String, String)>,
 }
 
 /// `--target` values among the cargo args (before `--`).
@@ -164,6 +202,19 @@ pub fn run(args: TestArgs) -> Result<u8> {
     let start = Instant::now();
     let before = store_totals(&project);
     // The test runners cargo starts print `(cached)` lines one level deeper.
+    if args.explain {
+        cmd.env(EXPLAIN_ENV, "1");
+    }
+    let summary = if args.summarize && plan.is_some() {
+        let dir = project.graph.target_dir.join("naspeed").join("test-runs");
+        std::fs::create_dir_all(&dir).context("create test-runs dir")?;
+        let id = format!("{}-{}", now_secs(), std::process::id());
+        let lines = dir.join(format!("{id}.jsonl"));
+        cmd.env(SUMMARY_ENV, &lines);
+        Some((dir, id, lines))
+    } else {
+        None
+    };
     let status = cmd
         .args(&args.cargo_args)
         .env(crate::ui::INDENT_ENV, (crate::ui::depth() + 1).to_string())
@@ -171,6 +222,12 @@ pub fn run(args: TestArgs) -> Result<u8> {
         .context("run cargo test")?;
     drop(plan);
     let code = exit_code(status);
+    if let Some((dir, id, lines)) = summary {
+        match write_summary(&dir, &id, &lines, &shown, code, start) {
+            Ok(path) => crate::ui_info!("run summary"; path = path.display()),
+            Err(e) => crate::ui_warn!(format!("run summary not written: {e:#}")),
+        }
+    }
     if code == 0 {
         crate::ui_info!("cargo test passed");
     } else {
@@ -188,20 +245,147 @@ pub fn run(args: TestArgs) -> Result<u8> {
     Ok(code.clamp(0, 255) as u8)
 }
 
+/// Fold the runners' JSON lines into `<dir>/<id>.json`.
+fn write_summary(
+    dir: &Path,
+    id: &str,
+    lines: &Path,
+    args: &[String],
+    exit_code: i32,
+    start: Instant,
+) -> Result<PathBuf> {
+    let text = std::fs::read_to_string(lines).unwrap_or_default();
+    let binaries: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let count = |status: &str| binaries.iter().filter(|b| b["status"] == status).count();
+    let saved: u64 = binaries
+        .iter()
+        .filter(|b| b["status"] == "replayed")
+        .filter_map(|b| b["ms"].as_u64())
+        .sum();
+    let summary = serde_json::json!({
+        "id": id,
+        "args": args,
+        "exit_code": exit_code,
+        "duration_ms": start.elapsed().as_millis() as u64,
+        "totals": {
+            "replayed": count("replayed"),
+            "passed": count("passed"),
+            "failed": count("failed"),
+            "saved_ms": saved,
+        },
+        "binaries": binaries,
+    });
+    let path = dir.join(format!("{id}.json"));
+    std::fs::write(&path, serde_json::to_vec_pretty(&summary)?)
+        .with_context(|| format!("write {}", path.display()))?;
+    let _ = std::fs::remove_file(lines);
+    Ok(path)
+}
+
+/// One binary's line in the `--summarize` file, if one was asked for.
+fn summarize(entry: serde_json::Value) {
+    let Some(path) = std::env::var_os(SUMMARY_ENV) else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let mut line = entry.to_string();
+        line.push('\n');
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+fn components_json(parts: &[(String, String)]) -> serde_json::Value {
+    serde_json::Value::Object(
+        parts
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect(),
+    )
+}
+
 fn passthrough(binary: &Path, args: &[OsString]) -> i32 {
     crate::wrapper::passthrough(binary, args)
 }
 
 /// `naspeed __test-run <binary> <args…>`, started by cargo.
 pub fn run_binary(binary: &Path, args: &[OsString]) -> i32 {
-    match try_cached_run(binary, args) {
+    let code = try_cached_run(binary, args);
+    hash_memo::flush();
+    match code {
         Some(code) => code,
         None => passthrough(binary, args),
     }
 }
 
+/// A line under the cargo output, at the runner's depth.
+fn note(level: crate::ui::Level, msg: &str, fields: &[(&str, &str)]) {
+    let fields: Vec<(&str, &dyn std::fmt::Display)> = fields
+        .iter()
+        .map(|(k, v)| (*k, v as &dyn std::fmt::Display))
+        .collect();
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "{}",
+        crate::ui::format_line(
+            crate::ui::depth(),
+            level,
+            msg,
+            &fields,
+            crate::ui::color_enabled(),
+        )
+    );
+}
+
+/// Why a stored pass no longer applies; `None` when it does.
+fn stale_reason(result: &TestResult, plan: &TestPlan, env: &crate::wrapper::Env) -> Option<String> {
+    if let Some(inputs) = &result.inputs
+        && let Some(i) = trace::changed(inputs, env)
+    {
+        return Some(format!("{} changed", i.describe()));
+    }
+    // Untraced runs, and traced runs that started a program the tracer
+    // could not follow, also depend on the workspace files.
+    let recorded = result.workspace_files.as_deref()?;
+    match test_key::workspace_files_hash(plan) {
+        Ok(now) if now == recorded => None,
+        Ok(_) => Some("workspace files outside the packages changed (run was not traced)".into()),
+        Err(e) => Some(format!("workspace files unreadable: {e:#}")),
+    }
+}
+
+/// Key parts that differ between the last run of this target and now.
+fn changed_components(last: &LastRun, now: &[(String, String)]) -> Vec<String> {
+    let before: std::collections::BTreeMap<&str, &str> = last
+        .components
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let after: std::collections::BTreeMap<&str, &str> =
+        now.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let mut out: Vec<String> = after
+        .iter()
+        .filter(|(k, v)| before.get(*k) != Some(*v))
+        .map(|(k, _)| (*k).to_owned())
+        .collect();
+    out.extend(
+        before
+            .keys()
+            .filter(|k| !after.contains_key(*k))
+            .map(|k| format!("{k} (gone)")),
+    );
+    out
+}
+
 fn try_cached_run(binary: &Path, args: &[OsString]) -> Option<i32> {
     let plan = TestPlan::read(Path::new(&std::env::var_os(PLAN_ENV)?)).ok()?;
+    hash_memo::init(&plan.store);
     let env = current_env();
     let manifest_dir = PathBuf::from(env.get("CARGO_MANIFEST_DIR")?);
     let package = plan.packages.get(&manifest_dir)?;
@@ -213,7 +397,7 @@ fn try_cached_run(binary: &Path, args: &[OsString]) -> Option<i32> {
         return None;
     }
     let cwd = std::env::current_dir().ok()?;
-    let key = test_key::key(
+    let k = test_key::key(
         &plan,
         package,
         &RunContext {
@@ -228,72 +412,187 @@ fn try_cached_run(binary: &Path, args: &[OsString]) -> Option<i32> {
     .ok()?;
     let settings = Settings::load();
     let store = Store::open(&plan.store, settings.cow_mode).ok()?;
+    let explain = std::env::var_os(EXPLAIN_ENV).is_some();
     let name = binary
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // `deps/<target>-<hash>`: the target without cargo's hash suffix.
+    let stem = name.rsplit_once('-').map_or(name.as_str(), |(s, _)| s);
+    let last_id = blake3::hash(
+        format!(
+            "{}\0{stem}\0{}",
+            manifest_dir.display(),
+            str_args.join("\0")
+        )
+        .as_bytes(),
+    )
+    .to_hex()[..32]
+        .to_string();
+    let last_path = store
+        .tests_dir()
+        .join("last")
+        .join(format!("{last_id}.json"));
 
-    let path = store.test_result_path(&key);
-    if let Some(result) = std::fs::read(&path)
+    let path = store.test_result_path(&k.key);
+    let stored = std::fs::read(&path)
         .ok()
         .and_then(|b| serde_json::from_slice::<TestResult>(&b).ok())
-        .filter(|r| r.version == TEST_RESULT_VERSION && r.key == key)
-    {
-        let _ = std::io::stdout().write_all(result.stdout.as_bytes());
-        let _ = std::io::stdout().flush();
-        let mut err = std::io::stderr().lock();
-        let _ = err.write_all(result.stderr.as_bytes());
-        let _ = writeln!(
-            err,
-            "{}",
-            crate::ui::format_line(
-                crate::ui::depth(),
-                crate::ui::Level::Info,
-                &format!("(cached) {name}: unchanged since a passing run, not re-run"),
-                &[("took", &crate::commands::stats::human_ms(result.run_ms))],
-                crate::ui::color_enabled(),
-            )
+        .filter(|r| r.version == TEST_RESULT_VERSION && r.key == k.key);
+    let reason = match &stored {
+        Some(result) => match stale_reason(result, &plan, &env) {
+            None => {
+                let _ = std::io::stdout().write_all(result.stdout.as_bytes());
+                let _ = std::io::stdout().flush();
+                let _ = std::io::stderr().write_all(result.stderr.as_bytes());
+                let checked = match &result.inputs {
+                    Some(i) => format!("{} recorded inputs", i.len()),
+                    None => "workspace files".into(),
+                };
+                let took = crate::commands::stats::human_ms(result.run_ms);
+                let mut fields = vec![("took", took.as_str())];
+                if explain {
+                    fields.push(("checked", checked.as_str()));
+                }
+                note(
+                    crate::ui::Level::Info,
+                    &format!("(cached) {name}: unchanged since a passing run, not re-run"),
+                    &fields,
+                );
+                // mtime is the result's last use for gc.
+                let _ = filetime::set_file_mtime(&path, filetime::FileTime::now());
+                // gc renames the log away under the exclusive lock.
+                let _lock = store.shared_lock();
+                summarize(serde_json::json!({
+                    "binary": name,
+                    "package": manifest_dir.strip_prefix(&plan.workspace_root).unwrap_or(&manifest_dir),
+                    "key": k.key,
+                    "status": "replayed",
+                    "ms": result.run_ms,
+                    "traced": result.inputs.is_some(),
+                    "components": components_json(&k.components),
+                    "inputs": result.inputs,
+                }));
+                store.append_usage(&Record::TestHit {
+                    key: k.key,
+                    saved_ms: result.run_ms,
+                });
+                return Some(0);
+            }
+            Some(why) => why,
+        },
+        None => match std::fs::read(&last_path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<LastRun>(&b).ok())
+        {
+            Some(last) if last.key != k.key => {
+                let parts = changed_components(&last, &k.components);
+                format!("key changed: {}", parts.join(", "))
+            }
+            Some(_) => "last run did not pass".into(),
+            None => "no earlier run".into(),
+        },
+    };
+    if explain {
+        note(
+            crate::ui::Level::Info,
+            &format!("running {name}"),
+            &[("why", &reason)],
         );
-        // mtime is the result's last use for gc.
-        let _ = filetime::set_file_mtime(&path, filetime::FileTime::now());
-        // gc renames the log away under the exclusive lock.
-        let _lock = store.shared_lock();
-        store.append_usage(&Record::TestHit {
-            key,
-            saved_ms: result.run_ms,
-        });
-        return Some(0);
     }
 
+    let lib = if plan.trace {
+        trace::library(&plan.store)
+    } else {
+        None
+    };
+    let log = store.tmp_path("trace");
+    let child_env = lib
+        .as_deref()
+        .map(|l| trace::child_env(l, &log, &env))
+        .unwrap_or_default();
     let started = Instant::now();
-    let output = run_teed(binary, args)
+    let output = run_teed_env(binary, args, &child_env)
         .inspect_err(|e| crate::ui_error!(format!("failed to run {}: {e:#}", binary.display())))
         .ok()?;
     let run_ms = started.elapsed().as_millis() as u64;
     let code = exit_code(output.status);
+    let summary_base = serde_json::json!({
+        "binary": name,
+        "package": manifest_dir.strip_prefix(&plan.workspace_root).unwrap_or(&manifest_dir),
+        "key": k.key,
+        "why": reason,
+        "ms": run_ms,
+        "components": components_json(&k.components),
+    });
+    if code != 0 {
+        let mut e = summary_base.clone();
+        e["status"] = "failed".into();
+        e["exit_code"] = code.into();
+        summarize(e);
+    }
     if code == 0
         && let (Some(stdout), Some(stderr)) = (output.stdout, output.stderr)
     {
+        let traced = lib.as_ref().and_then(|_| {
+            let excl = trace::Exclusions::new(&plan.target_dir, &plan.store, &env);
+            trace::collect(&log, binary, &env, &excl)
+        });
+        let complete = traced.as_ref().is_some_and(|t| !t.partial);
+        let workspace_files = if complete {
+            None
+        } else {
+            test_key::workspace_files_hash(&plan).ok()
+        };
+        if explain && lib.is_some() && !complete {
+            note(
+                crate::ui::Level::Warn,
+                &format!("{name}: run not fully traced; also keyed on workspace files"),
+                &[],
+            );
+        }
+        let inputs = traced.map(|t| t.inputs);
+        let mut e = summary_base;
+        e["status"] = "passed".into();
+        e["traced"] = (if complete {
+            "complete"
+        } else if inputs.is_some() {
+            "partial"
+        } else {
+            "no"
+        })
+        .into();
+        e["inputs"] = serde_json::to_value(&inputs).unwrap_or_default();
+        summarize(e);
         let result = TestResult {
             version: TEST_RESULT_VERSION,
-            key: key.clone(),
+            key: k.key.clone(),
             binary: name,
             stdout,
             stderr,
             run_ms,
             created: now_secs(),
+            inputs,
+            workspace_files,
+            components: k.components.clone(),
+        };
+        let last = LastRun {
+            key: k.key.clone(),
+            components: k.components,
         };
         match serde_json::to_vec(&result)
             .map_err(anyhow::Error::from)
             .and_then(|b| store.write_file(&path, &b))
+            .and_then(|()| store.write_file(&last_path, &serde_json::to_vec(&last)?))
         {
             Ok(()) => {
                 let _lock = store.shared_lock();
-                store.append_usage(&Record::TestRun { key, run_ms })
+                store.append_usage(&Record::TestRun { key: k.key, run_ms })
             }
             Err(e) => tracing::warn!("test result not stored: {e:#}"),
         }
     }
+    let _ = std::fs::remove_file(&log);
     Some(code)
 }
 

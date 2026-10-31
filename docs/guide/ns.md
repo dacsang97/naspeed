@@ -60,6 +60,8 @@ binary = "api-noui"
 cache = true                                 # false: always run
 env = ["DATABASE_URL"]                       # env vars the tests read (part of the key)
 inputs = ["testdata"]                        # extra files/dirs read at run time
+trace = true                                 # record what tests read at run time
+exclude = ["docs/**"]                        # left out of untraced runs' workspace files
 
 [image]                                      # OCI image
 name = "ghcr.io/owner/api"
