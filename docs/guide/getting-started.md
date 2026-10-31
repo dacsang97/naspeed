@@ -25,8 +25,18 @@ cargo build --release                # from a checkout: ./target/release/naspeed
 Then point cargo at it:
 
 ```sh
-naspeed setup --store /Volumes/Work/.naspeed
+naspeed setup                        # store in ~/.naspeed
 ```
+
+The store must be on the same volume as your projects. If they live on another
+volume, pass `--store` with a dir on that volume:
+
+```sh
+naspeed setup --store /Volumes/Work/.naspeed   # macOS: projects under /Volumes/Work
+naspeed setup --store /mnt/data/.naspeed       # Linux: projects under /mnt/data
+```
+
+Run it once per volume to add more stores; each `setup` keeps the earlier ones.
 
 `setup` copies the binary into `~/.cargo/bin`, so after `brew upgrade naspeed`
 or a new `cargo install`, run `naspeed setup` again to refresh that copy.
@@ -47,7 +57,9 @@ or a new `cargo install`, run `naspeed setup` again to refresh that copy.
    `file:line`, but a debugger can no longer inspect their local variables.
 4. Creates the store and records it in `~/.config/naspeed/config.toml`. The
    store must be on the same volume as your projects, because clones cannot
-   cross volumes. Without `--store`, setup uses `<volume of cwd>/.naspeed`.
+   cross volumes. Without `--store`, setup uses `~/.naspeed`; run from a dir
+   on another volume (say `/Volumes/Work`), it uses `<that volume>/.naspeed`
+   instead. Run `setup` once per volume to add a store for each.
 5. Prints any `RUSTC_WRAPPER` found in your environment or shell rc files. An
    env `RUSTC_WRAPPER` overrides the config and bypasses naspeed, so remove
    those lines yourself; naspeed never edits rc files.

@@ -17,7 +17,13 @@ projects.
 
 ```sh
 brew install dacsang97/tap/naspeed   # or: cargo install naspeed --locked
-naspeed setup --store /Volumes/Work/.naspeed
+naspeed setup                        # store in ~/.naspeed
+```
+
+If your projects live on another volume, put the store there instead:
+
+```sh
+naspeed setup --store /Volumes/Work/.naspeed   # projects under /Volumes/Work
 ```
 
 `setup` installs the binary to `~/.cargo/bin/naspeed` (plus the `ns` symlink),

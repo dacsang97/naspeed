@@ -4,7 +4,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::cli::SetupArgs;
 use crate::config::{self, Settings};
@@ -22,12 +22,17 @@ pub fn backups_dir(config_dir: &Path) -> PathBuf {
 }
 
 fn default_store() -> Result<PathBuf> {
-    let cwd = std::env::current_dir()?;
-    let mount = volume_root::mount_point(&cwd).context("find volume of current dir")?;
-    if mount == Path::new("/") {
-        bail!(
-            "the current dir is on the system volume; pass --store <dir> on the volume that holds your projects"
-        );
+    default_store_for(&std::env::current_dir()?, &config::home_dir())
+}
+
+/// `~/.naspeed` when `cwd` is on the home or system volume (a fresh install
+/// runs `setup` from `~`), else `<volume of cwd>/.naspeed` so projects on an
+/// external volume get a store they can clone from.
+fn default_store_for(cwd: &Path, home: &Path) -> Result<PathBuf> {
+    let mount = volume_root::mount_point(cwd).context("find volume of current dir")?;
+    let on_home_volume = volume_root::device_of(cwd) == volume_root::device_of(home);
+    if on_home_volume || mount == Path::new("/") {
+        return Ok(home.join(".naspeed"));
     }
     Ok(mount.join(".naspeed"))
 }
@@ -215,4 +220,20 @@ pub fn run(args: SetupArgs) -> Result<u8> {
         }
     }
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_store_is_in_home_when_cwd_shares_its_volume() {
+        let home = tempfile::tempdir().unwrap();
+        let project = home.path().join("code/app");
+        std::fs::create_dir_all(&project).unwrap();
+        assert_eq!(
+            default_store_for(&project, home.path()).unwrap(),
+            home.path().join(".naspeed")
+        );
+    }
 }

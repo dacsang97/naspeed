@@ -124,7 +124,7 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct SetupArgs {
-    /// Store root; must be on the same volume as your projects. Default: `<volume of cwd>/.naspeed`.
+    /// Store root; must be on the same volume as your projects. Default: `~/.naspeed`, or `<volume of cwd>/.naspeed` when run on another volume.
     #[arg(long)]
     pub store: Option<PathBuf>,
     /// `build.jobs` written to ~/.cargo/config.toml.

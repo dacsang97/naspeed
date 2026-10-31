@@ -66,7 +66,7 @@ $(block x86_64-unknown-linux-musl)
   def caveats
     <<~TEXT
       Point cargo at naspeed (copies the binary to ~/.cargo/bin):
-        naspeed setup --store /path/on/projects/volume/.naspeed
+        naspeed setup   # store in ~/.naspeed; --store <dir> for another volume
       Re-run \`naspeed setup\` after \`brew upgrade naspeed\` to refresh that copy.
     TEXT
   end
