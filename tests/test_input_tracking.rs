@@ -194,6 +194,11 @@ fn every_dependency_change_reruns(traced: bool) {
 
     let why = p.reruns_and_fails("bad");
     assert!(why.contains("PROBE_MODE"), "{why}");
+    // The closing summary names the reason without --explain too.
+    assert!(
+        why.contains("why ran") && why.contains("env:PROBE_MODE (1)"),
+        "{why}"
+    );
     assert!(p.replays());
 
     p.set("shared/value.txt", "shared-v2\n");
