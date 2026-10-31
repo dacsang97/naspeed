@@ -31,6 +31,8 @@ export default defineConfig({
           { text: 'ns front-end', link: '/guide/ns' },
           { text: 'Test result cache', link: '/guide/test-cache' },
           { text: 'Peer cache over Tailscale', link: '/guide/peer-cache' },
+          { text: 'GitHub Actions', link: '/guide/github-actions' },
+          { text: 'AI agents', link: '/guide/agents' },
         ],
       },
       {

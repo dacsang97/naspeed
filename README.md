@@ -49,6 +49,11 @@ Everything else lives in the [docs site](https://dacsang97.github.io/naspeed/)
   `ns dev`, `ns test`, `ns check`, `ns fmt`, `ns release`, `ns image`, `ns ci init`, `ns.toml`
 - [Test result cache](https://dacsang97.github.io/naspeed/guide/test-cache) and
   [Peer cache over Tailscale](https://dacsang97.github.io/naspeed/guide/peer-cache)
+- [GitHub Actions](https://dacsang97.github.io/naspeed/guide/github-actions) —
+  `dacsang97/naspeed-action`: install, store cache, job summary
+- [AI agents](https://dacsang97.github.io/naspeed/guide/agents) —
+  instructions block for `AGENTS.md` / `CLAUDE.md`, and a prompt to set a
+  project up with naspeed
 - [How it works](https://dacsang97.github.io/naspeed/guide/how-it-works) —
   cache key, workspace crates, build scripts, slots
 - [Configuration](https://dacsang97.github.io/naspeed/guide/configuration) —
