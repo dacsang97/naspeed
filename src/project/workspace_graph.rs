@@ -13,6 +13,7 @@ use serde_json::Value;
 pub struct Member {
     pub name: String,
     pub version: String,
+    pub edition: String,
     pub manifest_path: PathBuf,
     /// Directory holding the member's `Cargo.toml`.
     pub dir: PathBuf,
@@ -101,6 +102,7 @@ impl WorkspaceGraph {
             members.push(Member {
                 name: pkg["name"].as_str().context("package name")?.to_string(),
                 version: pkg["version"].as_str().unwrap_or_default().to_string(),
+                edition: pkg["edition"].as_str().unwrap_or("2015").to_string(),
                 dir: manifest_path
                     .parent()
                     .map(Path::to_path_buf)

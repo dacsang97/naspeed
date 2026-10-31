@@ -25,6 +25,8 @@ const SUBCOMMANDS: &[&str] = &[
     "ci",
     "cache",
     "test",
+    "check",
+    "fmt",
     "stats",
     "__test-run",
     "__warm-incremental",
@@ -100,6 +102,10 @@ pub enum Command {
     Ci(crate::ci::CiCommand),
     /// `cargo test` that replays unchanged passing test binaries (test result cache).
     Test(crate::testcache::TestArgs),
+    /// Format check, then clippy with warnings denied over the whole workspace.
+    Check(crate::commands::check::CheckArgs),
+    /// `cargo fmt` over the whole workspace (`--check` to only report).
+    Fmt(crate::commands::check::FmtArgs),
     /// Time saved by the build cache, the test cache and peer fetches.
     Stats(StatsArgs),
     /// Export/import store entries through a directory (CI cache transfer).
@@ -264,6 +270,8 @@ pub fn run(args: Vec<OsString>) -> Result<u8> {
         Command::Ci(c) => crate::ci::run(c),
         Command::Cache(c) => commands::cache_transfer::run(c),
         Command::Test(a) => crate::testcache::run(a),
+        Command::Check(a) => commands::check::run(a),
+        Command::Fmt(a) => commands::check::run_fmt(a),
         Command::Stats(a) => commands::stats::run(a),
         Command::WarmIncremental(a) => {
             Ok(crate::wrapper::incremental_warm::run(&a.program, &a.args).clamp(0, 255) as u8)

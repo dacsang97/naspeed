@@ -5,10 +5,16 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 
 fn main() {
-    let mut port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
+    let mut port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8080);
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--port") {
-        port = args.get(i + 1).and_then(|p| p.parse().ok()).expect("--port <N>");
+        port = args
+            .get(i + 1)
+            .and_then(|p| p.parse().ok())
+            .expect("--port <N>");
     }
     if args.iter().any(|a| a == "--version") {
         // NS_VERSION is set by `ns release`; plain cargo builds fall back.
