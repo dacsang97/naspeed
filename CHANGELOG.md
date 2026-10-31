@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/dacsang97/naspeed/compare/v0.3.0...v0.4.0) - 2026-10-31
+
+### Added
+
+- *(test)* run every binary by default and say why binaries ran ([#14](https://github.com/dacsang97/naspeed/pull/14))
+
+### Fixed
+
+- *(test)* start system binaries without the tracer inserted ([#15](https://github.com/dacsang97/naspeed/pull/15))
+
 ## [0.3.0](https://github.com/dacsang97/naspeed/compare/v0.2.0...v0.3.0) - 2026-10-31
 
 ### Added
