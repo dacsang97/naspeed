@@ -16,8 +16,14 @@ clones (APFS, btrfs, xfs); the store must be on the same volume as your
 projects.
 
 ```sh
-cargo build --release
-./target/release/naspeed setup --store /Volumes/Work/.naspeed
+brew install dacsang97/tap/naspeed   # or: cargo install naspeed --locked
+naspeed setup                        # store in ~/.naspeed
+```
+
+If your projects live on another volume, put the store there instead:
+
+```sh
+naspeed setup --store /Volumes/Work/.naspeed   # projects under /Volumes/Work
 ```
 
 `setup` installs the binary to `~/.cargo/bin/naspeed` (plus the `ns` symlink),
