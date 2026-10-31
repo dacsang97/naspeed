@@ -1,0 +1,7 @@
+[workspace]
+members = ["crates/greeter", "apps/hello-server"]
+resolver = "2"
+
+[workspace.package]
+version = "0.3.1"
+edition = "2021"

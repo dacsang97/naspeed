@@ -1,0 +1,11 @@
+[dev]
+bin = "hello-server"
+args = ["--port", "18080"]
+ports = [18080]
+
+[release]
+bins = ["hello-server"]
+archive = { files = ["README.md"] }
+
+[image]
+name = "localhost:5000/ns-fixture/hello-server"

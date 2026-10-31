@@ -1,0 +1,12 @@
+[package]
+name = "hello-server"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+greeter = { path = "../../crates/greeter" }
+
+[features]
+# Variant used by multi-build release tests: answers in upper case.
+shout = []
