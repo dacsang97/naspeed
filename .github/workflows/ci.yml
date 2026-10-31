@@ -52,10 +52,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      # naspeed caches its own build; only pushes to main save the store.
+      - uses: dacsang97/naspeed-action@v1
         with:
-          key: clippy
-          save-if: ${{ github.event_name == 'push' }}
+          cache-key: clippy
       - run: cargo clippy --locked --all-targets -- -D warnings
 
   test:
@@ -71,14 +71,16 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.ref || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # naspeed caches its own build; only pushes to main save the store.
+      - uses: dacsang97/naspeed-action@v1
         with:
-          key: test
-          save-if: ${{ github.event_name == 'push' }}
+          cache-key: test
       - run: cargo check --locked --all-targets
       # Unit tests only: the integration suite in tests/ needs Docker, zig and
       # reflink filesystems that hosted runners do not provide.
-      - run: cargo test --locked --lib --bins
+      # `naspeed test` replays test binaries unchanged since a passing run.
+      - run: naspeed test --locked --lib --bins
+      - run: naspeed stats
 
   package:
     name: package
@@ -89,8 +91,8 @@ jobs:
           persist-credentials: false
           ref: ${{ inputs.ref || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # naspeed caches its own build; only pushes to main save the store.
+      - uses: dacsang97/naspeed-action@v1
         with:
-          key: package
-          save-if: ${{ github.event_name == 'push' }}
+          cache-key: package
       - run: cargo publish --dry-run --locked
