@@ -26,6 +26,9 @@ If your projects live on another volume, put the store there instead:
 naspeed setup --store /Volumes/Work/.naspeed   # projects under /Volumes/Work
 ```
 
+On Windows, use `cargo install naspeed --locked` or the `.zip` from the
+releases page; see [Windows](https://dacsang97.github.io/naspeed/guide/getting-started#windows).
+
 `setup` installs the binary to `~/.cargo/bin/naspeed` (plus the `ns` symlink),
 backs up `~/.cargo/config.toml` and points `build.rustc-wrapper` at naspeed.
 From then on every `cargo` call, from a shell, an IDE, rust-analyzer or an

@@ -38,10 +38,6 @@ naspeed setup --store /mnt/data/.naspeed       # Linux: projects under /mnt/data
 naspeed setup --store D:\.naspeed              # Windows: projects on the D: Dev Drive
 ```
 
-Windows release archives (`naspeed-<tag>-x86_64-pc-windows-msvc.zip`, and
-`aarch64`) are on the [GitHub releases](https://github.com/dacsang97/naspeed/releases)
-page; unzip and run `naspeed.exe setup`.
-
 Run it once per volume to add more stores; each `setup` keeps the earlier ones.
 
 `setup` copies the binary into `~/.cargo/bin`, so after `brew upgrade naspeed`
@@ -74,6 +70,43 @@ or a new `cargo install`, run `naspeed setup` again to refresh that copy.
 
 Running `setup` again is safe. After setup, every `cargo` call goes through
 naspeed, whether it comes from a shell, an IDE, rust-analyzer or an agent.
+
+### Windows
+
+Install Rust with rustup and the MSVC toolchain first. Then, in PowerShell:
+
+```powershell
+irm https://dacsang97.github.io/naspeed/install.ps1 | iex
+```
+
+The [script](https://github.com/dacsang97/naspeed/blob/main/docs/public/install.ps1)
+downloads the latest release zip for your CPU (x86_64 or ARM64) into a temp
+folder, checks its SHA-256, runs `naspeed.exe setup` and removes the folder. To
+put the store on the drive that holds your code, set `NASPEED_STORE` on the same
+line (and `NASPEED_VERSION = "v0.5.0"` to pin a release):
+
+```powershell
+$env:NASPEED_STORE = "D:\.naspeed"; irm https://dacsang97.github.io/naspeed/install.ps1 | iex
+```
+
+Paste each command as one line: some consoles run a multi-line paste out of
+order.
+
+Without the script: `cargo install naspeed --locked` then `naspeed setup`, or
+unzip `naspeed-<tag>-<arch>-pc-windows-msvc.zip` from the
+[releases](https://github.com/dacsang97/naspeed/releases) and run
+`naspeed-<tag>-<arch>-pc-windows-msvc\naspeed.exe setup`.
+
+`setup` copies `naspeed.exe` and `ns.exe` into `%USERPROFILE%\.cargo\bin`, so
+the unzipped folder can be deleted afterwards. Without `--store`, the store goes
+to `%USERPROFILE%\.naspeed`, or to `<drive>:\.naspeed` when setup runs from a
+folder on another drive. Run setup once per drive that holds projects.
+
+On NTFS naspeed speeds builds up but copies instead of cloning, so it saves no
+disk; keep code and store on a [Dev Drive](https://learn.microsoft.com/windows/dev-drive/)
+(ReFS) to save disk as well. To upgrade, install the new release and run
+`naspeed setup` again. Build-script run caching, `ns test` runtime input
+tracking and `setup --cross` are not available on Windows (see [Limits](./limits)).
 
 ## Check that it works
 

@@ -1,0 +1,42 @@
+name: install-script
+
+# Runs docs/public/install.ps1 (served as the Windows one-line installer) on a
+# Windows runner, under Windows PowerShell 5.1 and PowerShell 7.
+on:
+  pull_request:
+    paths:
+      - docs/public/install.ps1
+      - .github/workflows/install-script.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: install (${{ matrix.shell }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Run the installer the way the docs do
+        env:
+          NASPEED_STORE: D:\.naspeed
+        run: Get-Content docs/public/install.ps1 -Raw | Invoke-Expression
+      - name: naspeed and ns are installed and wired into cargo
+        run: |
+          $bin = Join-Path $env:USERPROFILE '.cargo\bin'
+          & "$bin\naspeed.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & "$bin\ns.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & "$bin\naspeed.exe" status --check
+          if ($LASTEXITCODE -ne 0) { exit 1 }
