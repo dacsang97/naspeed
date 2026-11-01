@@ -11,9 +11,9 @@ Docs: <https://dacsang97.github.io/naspeed/>
 
 ## Quick start
 
-Requires Rust 1.98+ on macOS or Linux. Disk savings need a filesystem with
-clones (APFS, btrfs, xfs); the store must be on the same volume as your
-projects.
+Requires Rust 1.98+ on macOS, Linux or Windows. Disk savings need a
+filesystem with clones (APFS, btrfs, xfs, or ReFS on a Windows Dev Drive); the
+store must be on the same volume as your projects.
 
 ```sh
 brew install dacsang97/tap/naspeed   # or: cargo install naspeed --locked

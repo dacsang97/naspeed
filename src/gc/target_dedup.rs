@@ -6,7 +6,6 @@
 //! rebuilding through the store.
 
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -46,9 +45,8 @@ fn walk(dir: &Path, out: &mut Vec<(PathBuf, u64)>) {
 
 fn copy_xattrs(from: &Path, to: &Path) {
     for name in [XATTR_NAME, PLACED_XATTR] {
-        let mut buf = [0u8; 256];
-        if let Ok(n) = rustix::fs::getxattr(from, name, &mut buf) {
-            let _ = rustix::fs::setxattr(to, name, &buf[..n], rustix::fs::XattrFlags::empty());
+        if let Some(value) = crate::platform::get_attr(from, name) {
+            let _ = crate::platform::set_attr(to, name, &value);
         }
     }
 }
@@ -69,16 +67,15 @@ fn replace_with_clone(keeper: &Path, dup: &Path) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(std::io::Error::other("volume does not support clones"));
     }
-    std::fs::set_permissions(
-        &tmp,
-        std::fs::Permissions::from_mode(meta.permissions().mode()),
-    )?;
     copy_xattrs(dup, &tmp);
+    // Times before the mode: setting times needs write access, which a
+    // read-only mode takes away on Windows.
     filetime::set_file_times(
         &tmp,
         FileTime::from_last_access_time(&meta),
         FileTime::from_last_modification_time(&meta),
     )?;
+    std::fs::set_permissions(&tmp, meta.permissions())?;
     std::fs::rename(&tmp, dup).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
@@ -147,7 +144,8 @@ mod tests {
         std::fs::write(b.join("gen.rs"), &blob).unwrap();
         let old = FileTime::from_unix_time(1_600_000_000, 0);
         filetime::set_file_mtime(b.join("gen.rs"), old).unwrap();
-        std::fs::set_permissions(b.join("gen.rs"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        crate::platform::set_mode(&b.join("gen.rs"), 0o600).unwrap();
+        let mode = crate::platform::mode_of(&std::fs::metadata(b.join("gen.rs")).unwrap());
 
         let stats = dedup(&[t.path().join("a"), t.path().join("b")], false).unwrap();
         if !cow_copy::supports_clone(t.path()) {
@@ -156,7 +154,7 @@ mod tests {
         assert_eq!(stats.replaced, 1);
         let meta = std::fs::metadata(b.join("gen.rs")).unwrap();
         assert_eq!(FileTime::from_last_modification_time(&meta), old);
-        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert_eq!(crate::platform::mode_of(&meta), mode);
         assert_eq!(std::fs::read(b.join("gen.rs")).unwrap(), blob);
         assert_eq!(private_size(&b.join("gen.rs")).unwrap_or(0), 0);
     }

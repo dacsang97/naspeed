@@ -15,7 +15,7 @@ hero:
 
 features:
   - title: Disk
-    details: On APFS (clonefile) and btrfs/xfs (FICLONE) a restored crate takes almost no extra space. Ten worktrees of one repo share their dependencies' blocks.
+    details: On APFS (clonefile), btrfs/xfs (FICLONE) and ReFS / Windows Dev Drive (block cloning) a restored crate takes almost no extra space. Ten worktrees of one repo share their dependencies' blocks.
   - title: Speed
     details: A new worktree or project gets every shared dependency straight from the store, including the results of build scripts that compile C (jemalloc-sys, aws-lc-sys, ring).
   - title: Workspace crates

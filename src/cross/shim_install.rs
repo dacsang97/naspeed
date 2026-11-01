@@ -2,7 +2,6 @@
 //! `~/.config/naspeed/bin/` and the cargo config keys that point at them.
 //! The host triple is skipped so native builds never go through zig.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -31,7 +30,7 @@ pub fn write_shims(dir: &Path, bin: &Path, triple: &str) -> Result<Vec<PathBuf>>
         if std::fs::read_to_string(&path).ok().as_deref() != Some(script.as_str()) {
             std::fs::write(&path, script)?;
         }
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+        crate::platform::set_mode(&path, 0o755)?;
         paths.push(path);
     }
     Ok(paths)
@@ -65,10 +64,16 @@ pub fn prepare(
         shims: Vec::new(),
         notes: Vec::new(),
     };
-    for triple in ZIG_TARGETS.iter().filter(|t| **t != host) {
-        let shims = write_shims(&shim_dir, bin, triple)?;
-        plan.edits.extend(zig_edits(triple, &shims));
-        plan.shims.extend(shims);
+    if cfg!(windows) {
+        plan.notes.push(
+            "zig: linker shims are POSIX shell scripts, so Linux targets are not set up on Windows hosts; use `cargo zigbuild` directly".into(),
+        );
+    } else {
+        for triple in ZIG_TARGETS.iter().filter(|t| **t != host) {
+            let shims = write_shims(&shim_dir, bin, triple)?;
+            plan.edits.extend(zig_edits(triple, &shims));
+            plan.shims.extend(shims);
+        }
     }
 
     if MSVC_TARGET != host {

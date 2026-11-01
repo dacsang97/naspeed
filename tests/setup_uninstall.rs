@@ -1,6 +1,6 @@
 //! `setup` / `uninstall` against a throwaway CARGO_HOME and config dir.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const NASPEED: &str = env!("CARGO_BIN_EXE_naspeed");
@@ -39,6 +39,7 @@ impl Home {
             .env("NO_COLOR", "1")
             .args(args)
             .env("HOME", &self.home)
+            .env("USERPROFILE", &self.home)
             .env("CARGO_HOME", &self.cargo_home)
             .env("NASPEED_CONFIG_DIR", &self.config)
             .env_remove("RUSTC_WRAPPER")
@@ -68,7 +69,28 @@ impl Home {
 }
 
 fn bin(home: &Home) -> PathBuf {
-    home.cargo_home.join("bin/naspeed")
+    home.cargo_home
+        .join("bin")
+        .join(format!("naspeed{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// `build.rustc-wrapper` as a string (TOML may quote a Windows path either way).
+fn rustc_wrapper(cfg: &str) -> Option<String> {
+    let doc: toml_edit::DocumentMut = cfg.parse().unwrap();
+    doc.get("build")?
+        .get("rustc-wrapper")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// The `ns` alias: a symlink to `naspeed` on Unix, a hard link (or copy)
+/// with the same bytes on Windows.
+fn assert_ns_alias(ns: &Path, bin: &Path) {
+    if cfg!(windows) {
+        assert_eq!(std::fs::read(ns).unwrap(), std::fs::read(bin).unwrap());
+    } else {
+        assert_eq!(std::fs::read_link(ns).unwrap(), PathBuf::from("naspeed"));
+    }
 }
 
 #[test]
@@ -76,8 +98,9 @@ fn setup_then_uninstall_is_byte_identical() {
     let h = Home::new(Some(ORIGINAL));
     let out = h.setup();
     let cfg = h.config_text().unwrap();
-    assert!(
-        cfg.contains(&format!("rustc-wrapper = \"{}\"", bin(&h).display())),
+    assert_eq!(
+        rustc_wrapper(&cfg).as_deref(),
+        Some(bin(&h).to_string_lossy().as_ref()),
         "{cfg}"
     );
     assert!(cfg.contains("jobs = 4"));
@@ -88,8 +111,11 @@ fn setup_then_uninstall_is_byte_identical() {
     assert!(!cfg.contains("SCCACHE_"));
     assert!(cfg.starts_with("# Existing user config."));
     assert!(bin(&h).is_file());
-    let ns = h.cargo_home.join("bin/ns");
-    assert_eq!(std::fs::read_link(&ns).unwrap(), PathBuf::from("naspeed"));
+    let ns = h
+        .cargo_home
+        .join("bin")
+        .join(format!("ns{}", std::env::consts::EXE_SUFFIX));
+    assert_ns_alias(&ns, &bin(&h));
     // Through the alias: CLI only, never wrapper mode.
     let help_out = Command::new(&ns).arg("--help").output().unwrap();
     let help = String::from_utf8_lossy(&help_out.stdout);
@@ -188,7 +214,7 @@ fn status_runs_and_reports_store() {
     assert!(
         out.contains(&format!(
             "path={}",
-            std::fs::canonicalize(&h.store).unwrap().display()
+            naspeed::platform::canonicalize(&h.store).unwrap().display()
         )),
         "{out}"
     );

@@ -11,7 +11,6 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
@@ -38,11 +37,22 @@ struct Memo {
 
 static MEMO: Mutex<Option<Memo>> = Mutex::new(None);
 
+/// Nanoseconds since the epoch, negative before it (like `st_mtime`).
+fn mtime_ns(meta: &std::fs::Metadata) -> i128 {
+    match meta.modified() {
+        Ok(t) => match t.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(d) => d.as_nanos() as i128,
+            Err(e) => -(e.duration().as_nanos() as i128),
+        },
+        Err(_) => 0,
+    }
+}
+
 fn stamp(meta: &std::fs::Metadata) -> Stamp {
     Stamp {
         size: meta.len(),
-        mtime_ns: meta.mtime() as i128 * 1_000_000_000 + meta.mtime_nsec() as i128,
-        ino: meta.ino(),
+        mtime_ns: mtime_ns(meta),
+        ino: crate::platform::file_index(meta),
     }
 }
 

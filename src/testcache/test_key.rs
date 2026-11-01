@@ -239,7 +239,11 @@ mod tests {
         std::fs::write(root.join("Cargo.lock"), "lock").unwrap();
         let binary = root.join("target/debug/deps/app-1234");
         std::fs::write(&binary, "test binary").unwrap();
-        std::fs::write(root.join("target/debug/app"), "bin v1").unwrap();
+        std::fs::write(
+            root.join(crate::platform::exe_name("target/debug/app")),
+            "bin v1",
+        )
+        .unwrap();
         let plan = TestPlan {
             store: root.join("store"),
             workspace_root: root.clone(),
@@ -301,7 +305,11 @@ mod tests {
         std::fs::write(root.join("app/src/lib.rs"), "fn b() {}").unwrap();
         let edited = key_with(&plan, &package, &binary, &env);
         assert_ne!(edited, with_db);
-        std::fs::write(root.join("target/debug/app"), "bin v2").unwrap();
+        std::fs::write(
+            root.join(crate::platform::exe_name("target/debug/app")),
+            "bin v2",
+        )
+        .unwrap();
         let rebuilt = key_with(&plan, &package, &binary, &env);
         assert_ne!(rebuilt, edited);
         std::fs::write(root.join("Cargo.lock"), "lock2").unwrap();
@@ -312,7 +320,11 @@ mod tests {
         env.insert("APP_MODE".into(), "x".into());
         let moded = key_with(&plan, &package, &binary, &env);
         assert_ne!(moded, relocked);
-        std::fs::write(root.join("target/debug/tool"), "tool v1").unwrap();
+        std::fs::write(
+            root.join(crate::platform::exe_name("target/debug/tool")),
+            "tool v1",
+        )
+        .unwrap();
         assert_ne!(key_with(&plan, &package, &binary, &env), moded);
     }
 
@@ -326,7 +338,11 @@ mod tests {
         let base = workspace_files_hash(&plan).unwrap();
         std::fs::write(root.join("docs/guide.md"), "edited").unwrap();
         std::fs::write(root.join("app/src/lib.rs"), "member change").unwrap();
-        std::fs::write(root.join("target/debug/app"), "build output").unwrap();
+        std::fs::write(
+            root.join(crate::platform::exe_name("target/debug/app")),
+            "build output",
+        )
+        .unwrap();
         assert_eq!(workspace_files_hash(&plan).unwrap(), base);
         std::fs::write(root.join("shared/v.txt"), "2").unwrap();
         assert_ne!(workspace_files_hash(&plan).unwrap(), base);

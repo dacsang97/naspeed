@@ -1,7 +1,8 @@
 //! Identity of an `--extern` artifact for the cache key.
 //!
 //! The identity is the blake3 of the file content, memoised in the xattr
-//! `user.naspeed.id` as `<hash>:<size>:<mtime_ns>`. Every artifact naspeed
+//! `user.naspeed.id` (an alternate data stream on Windows) as
+//! `<hash>:<size>:<mtime_ns>`. Every artifact naspeed
 //! restores is a clone of one store object, so the same dependency has the
 //! same identity in every target dir; artifacts built twice independently
 //! (they embed their own `OUT_DIR` paths) differ and simply miss.
@@ -25,9 +26,7 @@ fn stat_stamp(path: &Path) -> io::Result<(u64, u128)> {
 }
 
 pub fn read_xattr(path: &Path) -> Option<String> {
-    let mut buf = [0u8; 256];
-    let n = rustix::fs::getxattr(path, XATTR_NAME, &mut buf).ok()?;
-    String::from_utf8(buf[..n].to_vec()).ok()
+    String::from_utf8(crate::platform::get_attr(path, XATTR_NAME)?).ok()
 }
 
 /// The memoised hash if the file has not changed since it was stamped.
@@ -45,13 +44,7 @@ fn memoised(path: &Path) -> Option<String> {
 pub fn stamp(path: &Path, hash: &str) -> io::Result<()> {
     let (size, mtime) = stat_stamp(path)?;
     let value = format!("{hash}:{size}:{mtime}");
-    rustix::fs::setxattr(
-        path,
-        XATTR_NAME,
-        value.as_bytes(),
-        rustix::fs::XattrFlags::empty(),
-    )?;
-    Ok(())
+    crate::platform::set_attr(path, XATTR_NAME, value.as_bytes())
 }
 
 pub fn identity(path: &Path) -> io::Result<String> {
@@ -68,13 +61,11 @@ pub fn identity(path: &Path) -> io::Result<String> {
 pub const PLACED_XATTR: &str = "user.naspeed.placed";
 
 pub fn mark_placed(path: &Path) -> io::Result<()> {
-    rustix::fs::setxattr(path, PLACED_XATTR, b"1", rustix::fs::XattrFlags::empty())?;
-    Ok(())
+    crate::platform::set_attr(path, PLACED_XATTR, b"1")
 }
 
 pub fn is_placed(path: &Path) -> bool {
-    let mut buf = [0u8; 8];
-    rustix::fs::getxattr(path, PLACED_XATTR, &mut buf).is_ok()
+    crate::platform::get_attr(path, PLACED_XATTR).is_some()
 }
 
 #[cfg(test)]

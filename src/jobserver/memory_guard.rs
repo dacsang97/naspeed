@@ -2,7 +2,8 @@
 //!
 //! "Available" is what the OS can hand out without swapping: on macOS
 //! free + inactive + purgeable pages (the plain "free" count is misleadingly
-//! low because the page cache fills it), on Linux `MemAvailable`. Read
+//! low because the page cache fills it), on Linux `MemAvailable`, on Windows
+//! the available physical memory (standby pages included). Read
 //! directly instead of through `sysinfo` to control exactly which metric is
 //! used.
 
@@ -43,7 +44,16 @@ pub fn available_bytes() -> Option<u64> {
     Some(kb * 1024)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+pub fn available_bytes() -> Option<u64> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    // SAFETY: plain struct with its length set, as the API requires.
+    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    (unsafe { GlobalMemoryStatusEx(&mut status) } != 0).then_some(status.ullAvailPhys)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub fn available_bytes() -> Option<u64> {
     None
 }

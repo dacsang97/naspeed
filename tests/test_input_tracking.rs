@@ -311,6 +311,7 @@ fn summarize_writes_one_json_per_run_and_hashes_are_memoised() {
     let memo =
         std::fs::read_to_string(p.sb.store.join("memo/test-file-hashes.tsv")).unwrap_or_default();
     for rel in ["core/src/lib.rs", "core/data/value.txt", "app/src/lib.rs"] {
-        assert!(memo.contains(rel), "{rel} not memoised:\n{memo}");
+        let native = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
+        assert!(memo.contains(&native), "{rel} not memoised:\n{memo}");
     }
 }

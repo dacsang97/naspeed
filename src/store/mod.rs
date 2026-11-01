@@ -17,6 +17,8 @@
 //! unreferenced objects alone for a grace period so an in-flight writer's
 //! objects are never collected.
 
+#[cfg(windows)]
+mod block_clone;
 pub mod content_hash;
 pub mod cow_copy;
 pub mod key_lock;
@@ -26,7 +28,6 @@ pub mod usage_log;
 pub mod volume_root;
 
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -268,10 +269,8 @@ impl Store {
         };
         cow_copy::clone_or_copy(src, &tmp, mode)
             .with_context(|| format!("store {}", src.display()))?;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o444))?;
-        std::fs::rename(&tmp, &dst).inspect_err(|_| {
-            let _ = std::fs::remove_file(&tmp);
-        })?;
+        crate::platform::set_mode(&tmp, 0o444)?;
+        place_object(&tmp, &dst, size)?;
         Ok((hash, size))
     }
 
@@ -281,10 +280,9 @@ impl Store {
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(0o444))?;
-        std::fs::rename(tmp, &dst).inspect_err(|_| {
-            let _ = std::fs::remove_file(tmp);
-        })?;
+        crate::platform::set_mode(tmp, 0o444)?;
+        let size = std::fs::metadata(tmp)?.len();
+        place_object(tmp, &dst, size)?;
         Ok(())
     }
 
@@ -296,5 +294,43 @@ impl Store {
 
     pub fn append_usage(&self, record: &usage_log::Record) {
         usage_log::append(&self.root, record);
+    }
+}
+
+/// Rename a finished object into place. Objects are content-addressed, so a
+/// concurrent writer that got there first (Windows refuses to replace its
+/// read-only file) leaves exactly the bytes we wanted.
+fn place_object(tmp: &Path, dst: &Path, size: u64) -> std::io::Result<()> {
+    match std::fs::rename(tmp, dst) {
+        Ok(()) => Ok(()),
+        Err(_) if std::fs::metadata(dst).is_ok_and(|m| m.len() == size) => {
+            let _ = crate::platform::remove_file(tmp);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = crate::platform::remove_file(tmp);
+            Err(e)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placing_over_an_existing_read_only_object_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("obj");
+        std::fs::write(&dst, b"same").unwrap();
+        crate::platform::set_mode(&dst, 0o444).unwrap();
+        let tmp = dir.path().join("tmp");
+        std::fs::write(&tmp, b"same").unwrap();
+        crate::platform::set_mode(&tmp, 0o444).unwrap();
+        place_object(&tmp, &dst, 4).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"same");
+        assert!(!tmp.exists());
+        crate::platform::remove_file(&dst).unwrap();
+        assert!(!dst.exists());
     }
 }

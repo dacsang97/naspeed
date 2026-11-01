@@ -23,6 +23,10 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   fmt:
     name: fmt
@@ -43,7 +47,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -53,7 +57,10 @@ jobs:
         with:
           components: clippy
       # naspeed caches its own build; only pushes to main save the store.
-      - uses: dacsang97/naspeed-action@v1
+      # Windows runners build without it until a release ships Windows
+      # binaries for the action to install.
+      - if: runner.os != 'Windows'
+        uses: dacsang97/naspeed-action@v1
         with:
           cache-key: clippy
       - run: cargo clippy --locked --all-targets -- -D warnings
@@ -64,7 +71,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -72,8 +79,9 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       # The released naspeed caches the build; only pushes to main save the
-      # store.
-      - uses: dacsang97/naspeed-action@v1
+      # store. Not on Windows yet (no released Windows binary).
+      - if: runner.os != 'Windows'
+        uses: dacsang97/naspeed-action@v1
         with:
           cache-key: test
       # The tests run under the naspeed built from this commit, so its test
@@ -83,6 +91,13 @@ jobs:
       # filesystems that hosted runners do not provide.
       - run: cargo build --locked --bin naspeed
       - run: ./target/debug/naspeed test --locked --lib --bins --test test_input_tracking
+      # Windows also runs setup/uninstall and the wrapper end to end (store,
+      # restore into a second target dir, freshness) on the fixture
+      # workspace, whose registry crates the tests build offline.
+      - if: runner.os == 'Windows'
+        run: cargo fetch --locked --manifest-path tests/fixtures/sample_workspace/Cargo.toml
+      - if: runner.os == 'Windows'
+        run: ./target/debug/naspeed test --locked --test setup_uninstall --test materialize_integration
       # Also compiles the other integration tests, through the same store.
       - run: cargo check --locked --all-targets
 

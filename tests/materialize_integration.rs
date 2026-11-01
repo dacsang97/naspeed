@@ -167,6 +167,7 @@ fn max_concurrent(log: &str) -> usize {
 /// it must replace its outputs (new inode), never write into the existing
 /// file, or a hardlinked store object would be changed through the target.
 #[test]
+#[cfg(unix)]
 fn rustc_rebuild_replaces_output_inode() {
     use std::os::unix::fs::MetadataExt;
     let sb = Sandbox::new("inode");
@@ -208,6 +209,7 @@ fn rustc_rebuild_replaces_output_inode() {
 /// lz4-sys compiles C in its build script; a second target dir must reuse
 /// that run (OUT_DIR + directives) instead of compiling again.
 #[test]
+#[cfg(unix)]
 fn build_script_run_is_reused_across_target_dirs() {
     let sb = Sandbox::new("bsrun");
     let log = sb.root.join("naspeed.log");

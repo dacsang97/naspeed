@@ -263,8 +263,9 @@ mod tests {
     #[test]
     fn parses_cargo_registry_invocation() {
         let line = include_str!("../../tests/fixtures/rustc_args/itoa_registry.txt");
+        // lines(): a Windows checkout may give the fixture CRLF endings.
         let args: Vec<OsString> = line
-            .split('\n')
+            .lines()
             .filter(|l| !l.is_empty())
             .map(OsString::from)
             .collect();

@@ -1,5 +1,6 @@
 //! Copy-on-write file copies: `clonefile` on APFS, `FICLONE` reflink on
-//! btrfs/xfs, otherwise a real copy (`copy_file_range` on Linux). Hardlinks
+//! btrfs/xfs, block cloning (`FSCTL_DUPLICATE_EXTENTS_TO_FILE`) on ReFS and
+//! Dev Drive, otherwise a real copy (`copy_file_range` on Linux). Hardlinks
 //! only when explicitly configured.
 
 use std::io;
@@ -36,12 +37,32 @@ pub fn clone_or_copy(src: &Path, dst: &Path, mode: CowMode) -> io::Result<Method
     }
 }
 
+#[cfg(unix)]
 fn clone_unsupported(e: &io::Error) -> bool {
     matches!(
         e.raw_os_error(),
         Some(libc::ENOTSUP) | Some(libc::EXDEV) | Some(libc::EINVAL) | Some(libc::ENOSYS)
     ) || e.raw_os_error() == Some(libc::EOPNOTSUPP)
         || e.kind() == io::ErrorKind::Unsupported
+}
+
+#[cfg(windows)]
+fn clone_unsupported(e: &io::Error) -> bool {
+    use windows_sys::Win32::Foundation::{
+        ERROR_BLOCK_TOO_MANY_REFERENCES, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER,
+        ERROR_NOT_SAME_DEVICE, ERROR_NOT_SUPPORTED,
+    };
+    e.kind() == io::ErrorKind::Unsupported
+        || e.raw_os_error().is_some_and(|code| {
+            [
+                ERROR_INVALID_FUNCTION,
+                ERROR_NOT_SUPPORTED,
+                ERROR_NOT_SAME_DEVICE,
+                ERROR_INVALID_PARAMETER,
+                ERROR_BLOCK_TOO_MANY_REFERENCES,
+            ]
+            .contains(&(code as u32))
+        })
 }
 
 #[cfg(target_os = "macos")]
@@ -81,13 +102,17 @@ fn try_clone(src: &Path, dst: &Path) -> io::Result<()> {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+use super::block_clone::try_clone;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn try_clone(_src: &Path, _dst: &Path) -> io::Result<()> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
 fn plain_copy(src: &Path, dst: &Path) -> io::Result<()> {
-    // std::fs::copy uses copy_file_range on Linux and fcopyfile on macOS.
+    // std::fs::copy uses copy_file_range on Linux, fcopyfile on macOS and
+    // CopyFileExW on Windows.
     std::fs::copy(src, dst).map(|_| ())
 }
 

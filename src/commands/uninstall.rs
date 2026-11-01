@@ -60,13 +60,13 @@ pub fn run(args: UninstallArgs) -> Result<u8> {
 
     let alias = crate::setup::ns_alias();
     if crate::setup::is_our_ns_alias(&alias) {
-        std::fs::remove_file(&alias)?;
+        crate::platform::remove_exe(&alias)?;
         crate::ui_info!("ns alias removed"; path = alias.display());
     }
 
     let bin = installed_binary();
     if bin.exists() {
-        std::fs::remove_file(&bin)?;
+        crate::platform::remove_exe(&bin)?;
         crate::ui_info!("binary removed"; path = bin.display());
     }
 

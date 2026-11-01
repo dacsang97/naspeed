@@ -67,10 +67,7 @@ pub fn spawn(program: &Path, args: &[OsString]) {
 /// Body of `naspeed __warm-incremental <rustc> <args…>`.
 pub fn run(program: &Path, args: &[OsString]) -> i32 {
     // Low priority: never slow the build the user is waiting for.
-    // SAFETY: plain libc call on the current process.
-    unsafe {
-        libc::setpriority(libc::PRIO_PROCESS, 0, 15);
-    }
+    crate::platform::lower_priority();
     let settings = Settings::load();
     let _slot = jobserver::acquire(&settings);
     let nanos = std::time::SystemTime::now()

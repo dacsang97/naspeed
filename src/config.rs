@@ -47,9 +47,16 @@ pub struct Settings {
     pub warm_incremental: bool,
 }
 
+/// `$HOME`; on Windows `%USERPROFILE%` first, like cargo and rustup (a
+/// `HOME` set by MSYS or Cygwin is not where `.cargo` lives).
 pub fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
+    let var = |name| std::env::var_os(name).filter(|h| !h.is_empty());
+    let home = if cfg!(windows) {
+        var("USERPROFILE").or_else(|| var("HOME"))
+    } else {
+        var("HOME")
+    };
+    home.map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
@@ -84,6 +91,11 @@ impl Settings {
         let doc = read_doc(&config_dir.join("config.toml")).unwrap_or_default();
         let mut settings = Settings::from_doc(config_dir, &doc);
         settings.apply_env();
+        if cfg!(windows) && settings.cow_mode == CowMode::Hardlink {
+            // The read-only attribute of store objects is shared by every hard
+            // link, so rustc could not overwrite them on a rebuild.
+            settings.cow_mode = CowMode::Auto;
+        }
         settings
     }
 

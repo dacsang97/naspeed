@@ -124,7 +124,8 @@ Each `rustc` that really runs, whether passed through or a miss, holds one of N
 of logical cores. A killed process releases its slot automatically. Before
 starting, naspeed waits up to 30 seconds while available memory is below
 `min_free_mem_mb` (default 1536). Available memory means free + inactive +
-purgeable pages on macOS, and `MemAvailable` on Linux.
+purgeable pages on macOS, `MemAvailable` on Linux, and available physical
+memory on Windows.
 
 rustc still honors cargo's own jobserver. naspeed's slots are an extra,
 machine-level limit. Build scripts (for example the `cc` crate compiling C) and

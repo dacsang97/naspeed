@@ -20,13 +20,18 @@ use crate::jobserver;
 
 pub type Env = BTreeMap<String, String>;
 
+/// The process environment. Windows variable names are case-insensitive
+/// (`Path` is `PATH`), so they are upper-cased there to make lookups exact.
 pub fn current_env() -> Env {
     std::env::vars_os()
         .map(|(k, v)| {
-            (
-                k.to_string_lossy().into_owned(),
-                v.to_string_lossy().into_owned(),
-            )
+            let k = k.to_string_lossy();
+            let k = if cfg!(windows) {
+                k.to_uppercase()
+            } else {
+                k.into_owned()
+            };
+            (k, v.to_string_lossy().into_owned())
         })
         .collect()
 }
