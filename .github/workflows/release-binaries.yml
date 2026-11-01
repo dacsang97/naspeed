@@ -41,6 +41,12 @@ jobs:
           # Static musl binaries run on any Linux, including Homebrew on Linux.
           - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, cargo: zigbuild }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04, cargo: zigbuild }
+          # Zip archives with naspeed.exe for the naspeed-action and manual installs.
+          - { target: x86_64-pc-windows-msvc, os: windows-2025, cargo: build }
+          - { target: aarch64-pc-windows-msvc, os: windows-11-arm, cargo: build }
+    defaults:
+      run:
+        shell: bash
     env:
       TARGET: ${{ matrix.target }}
     steps:
@@ -65,19 +71,29 @@ jobs:
       - name: Smoke test
         if: matrix.target != 'x86_64-apple-darwin' && matrix.target != 'aarch64-unknown-linux-musl'
         run: |
-          "target/$TARGET/release/naspeed" --version | grep -Fx "naspeed ${TAG#v}"
+          "target/$TARGET/release/naspeed" --version | tr -d '\r' | grep -Fx "naspeed ${TAG#v}"
       - name: Package
         run: |
           name="naspeed-$TAG-$TARGET"
           mkdir "$name"
-          cp "target/$TARGET/release/naspeed" LICENSE NOTICE README.md "$name/"
-          tar -czf "$name.tar.gz" "$name"
-          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          cp LICENSE NOTICE README.md "$name/"
+          if [[ $TARGET == *windows* ]]; then
+            cp "target/$TARGET/release/naspeed.exe" "$name/"
+            archive="$name.zip"
+            pwsh -NoProfile -Command "Compress-Archive -Path '$name' -DestinationPath '$archive'"
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            cp "target/$TARGET/release/naspeed" "$name/"
+            archive="$name.tar.gz"
+            tar -czf "$archive" "$name"
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
       - name: Attach to GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release upload "$TAG" "naspeed-$TAG-$TARGET.tar.gz" "naspeed-$TAG-$TARGET.tar.gz.sha256" --clobber
+        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" --clobber
 
   homebrew:
     name: homebrew tap

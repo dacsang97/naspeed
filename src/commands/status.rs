@@ -58,8 +58,12 @@ pub fn run(args: StatusArgs) -> Result<u8> {
     let (_, doc) = cargo_config::read_config(&cargo_config_path())?;
     let wrapper = cargo_config::get(&doc, &cargo_config::key(&["build", "rustc-wrapper"]));
     let bin = installed_binary();
-    let active =
-        wrapper.as_deref().map(|w| w.trim_matches('"')) == Some(bin.to_string_lossy().as_ref());
+    // The raw TOML value: quoted, with Windows backslashes possibly escaped.
+    let wrapper_path = wrapper
+        .as_deref()
+        .and_then(|w| w.parse::<toml_edit::Value>().ok())
+        .and_then(|v| v.as_str().map(str::to_owned));
+    let active = wrapper_path.as_deref() == Some(bin.to_string_lossy().as_ref());
     let wrapper_value = wrapper.as_deref().unwrap_or("unset");
     if active {
         crate::ui_info!("cargo wraps rustc with naspeed"; rustc_wrapper = wrapper_value);

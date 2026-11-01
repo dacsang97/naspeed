@@ -125,7 +125,10 @@ impl Sandbox {
     }
 
     pub fn binary(&self, target: &str) -> PathBuf {
-        self.root.join(target).join("debug/sample-app")
+        self.root
+            .join(target)
+            .join("debug")
+            .join(format!("sample-app{}", std::env::consts::EXE_SUFFIX))
     }
 }
 

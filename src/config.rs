@@ -47,8 +47,15 @@ pub struct Settings {
     pub warm_incremental: bool,
 }
 
+/// `$HOME`, or `%USERPROFILE%` on Windows where `HOME` is usually unset.
 pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .or_else(|| {
+            cfg!(windows)
+                .then(|| std::env::var_os("USERPROFILE"))
+                .flatten()
+        })
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/"))
 }

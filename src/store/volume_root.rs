@@ -1,12 +1,10 @@
 //! Pick the store for a target dir: clones never cross volumes, so only a
-//! store on the same device (`st_dev`) can serve it.
+//! store on the same device (`st_dev`, the volume serial on Windows) can
+//! serve it.
 
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-pub fn device_of(path: &Path) -> Option<u64> {
-    std::fs::metadata(path).ok().map(|m| m.dev())
-}
+pub use crate::platform::device_of;
 
 /// The configured store on the same device as `dir`, if it exists and is
 /// writable. A missing store (e.g. unplugged USB volume) means passthrough.
@@ -25,12 +23,12 @@ pub fn existing_ancestor(path: &Path) -> Option<&Path> {
 }
 
 fn is_writable(dir: &Path) -> bool {
-    rustix::fs::access(dir, rustix::fs::Access::WRITE_OK).is_ok()
+    crate::platform::is_writable_dir(dir)
 }
 
 /// Mount point of the volume holding `path` (walk up while `st_dev` stays).
 pub fn mount_point(path: &Path) -> Option<PathBuf> {
-    let path = std::fs::canonicalize(path).ok()?;
+    let path = crate::platform::canonicalize(path).ok()?;
     let dev = device_of(&path)?;
     let mut current = path.as_path();
     while let Some(parent) = current.parent() {

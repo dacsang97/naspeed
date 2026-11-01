@@ -13,6 +13,7 @@ pub mod dev;
 pub mod gc;
 pub mod image;
 pub mod jobserver;
+pub mod platform;
 pub mod project;
 pub mod release;
 pub mod remote;

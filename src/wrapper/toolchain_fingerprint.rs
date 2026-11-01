@@ -37,8 +37,9 @@ const MEMO_SUBDIR: &str = "toolchain-ids";
 
 fn find_in_path(name: &str, env: &Env) -> Option<PathBuf> {
     let path = env.get("PATH")?;
+    let names = [name.to_owned(), crate::platform::exe_name(name)];
     std::env::split_paths(path)
-        .map(|dir| dir.join(name))
+        .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
         .find(|candidate| candidate.is_file())
 }
 
@@ -51,11 +52,24 @@ pub fn resolve_program(program: &Path, cwd: &Path, env: &Env) -> Option<PathBuf>
     }
 }
 
+/// rustup's proxies are symlinks to `rustup` on Unix, and hardlinks (or
+/// copies) of `rustup.exe` next to it on Windows.
 fn is_rustup_proxy(resolved: &Path) -> bool {
-    std::fs::canonicalize(resolved)
-        .ok()
+    let canonical = crate::platform::canonicalize(resolved).ok();
+    if canonical
+        .as_deref()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .is_some_and(|n| n.starts_with("rustup"))
+    {
+        return true;
+    }
+    cfg!(windows)
+        && resolved
+            .parent()
+            .map(|dir| dir.join(crate::platform::exe_name("rustup")))
+            .and_then(|rustup| std::fs::metadata(rustup).ok())
+            .zip(std::fs::metadata(resolved).ok())
+            .is_some_and(|(proxy, exe)| proxy.len() == exe.len())
 }
 
 fn rustup_toolchain_dir(env: &Env) -> Option<PathBuf> {
@@ -82,7 +96,7 @@ pub fn sysroot(program: &Path, cwd: &Path, env: &Env) -> Result<PathBuf> {
         }
         // A real rustc binary: <sysroot>/bin/rustc.
         Some(exe) => {
-            if let Some(root) = std::fs::canonicalize(exe)
+            if let Some(root) = crate::platform::canonicalize(exe)
                 .ok()
                 .and_then(|p| p.parent()?.parent().map(Path::to_path_buf))
                 && root.join("lib").is_dir()
@@ -106,27 +120,33 @@ pub fn sysroot(program: &Path, cwd: &Path, env: &Env) -> Result<PathBuf> {
     Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
 }
 
+/// Where the driver library lives: `lib/librustc_driver-*.{so,dylib}` on
+/// Unix, `bin/rustc_driver-*.dll` on Windows.
+const DRIVER_DIR: &str = if cfg!(windows) { "bin" } else { "lib" };
+const DRIVER_PREFIX: &str = if cfg!(windows) {
+    "rustc_driver-"
+} else {
+    "librustc_driver-"
+};
+
 /// The driver dylib and a cheap stamp of it (name, inode, size, mtime).
 fn driver_stamp(sysroot: &Path) -> Result<(PathBuf, String)> {
-    let lib = sysroot.join("lib");
+    let lib = sysroot.join(DRIVER_DIR);
     for entry in std::fs::read_dir(&lib).with_context(|| format!("read {}", lib.display()))? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with("librustc_driver-") {
+        if name.starts_with(DRIVER_PREFIX) {
             let meta = entry.metadata()?;
             let mtime = meta
                 .modified()?
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
-            #[cfg(unix)]
-            let ino = std::os::unix::fs::MetadataExt::ino(&meta);
-            #[cfg(not(unix))]
-            let ino = 0u64;
+            let ino = crate::platform::file_index(&meta);
             return Ok((entry.path(), format!("{name}:{ino}:{}:{mtime}", meta.len())));
         }
     }
-    bail!("no librustc_driver in {}", lib.display())
+    bail!("no {DRIVER_PREFIX}* in {}", lib.display())
 }
 
 fn parse_memo(text: &str) -> Option<(String, String)> {
@@ -151,7 +171,7 @@ pub fn resolve(program: &Path, cwd: &Path, env: &Env, memo_dir: &Path) -> Result
             driver_hash,
         });
     }
-    let rustc = sysroot.join("bin").join("rustc");
+    let rustc = sysroot.join("bin").join(crate::platform::exe_name("rustc"));
     let out = Command::new(&rustc)
         .arg("-vV")
         .output()
@@ -199,7 +219,7 @@ mod tests {
     /// path: a copy of the driver in another dir hashes the same.
     #[test]
     fn identity_ignores_install_path() {
-        let env: Env = std::env::vars().collect();
+        let env = crate::wrapper::current_env();
         let cwd = std::env::current_dir().unwrap();
         let memo = tempfile::tempdir().unwrap();
         let a = resolve(Path::new("rustc"), &cwd, &env, memo.path()).unwrap();

@@ -1,6 +1,8 @@
 //! `ns dev` end to end on a copy of the `ns_project` fixture: real cargo,
 //! real file watching, a real HTTP server on port 18080. Everything runs in
-//! one test because the scenario shares that single port.
+//! one test because the scenario shares that single port. Unix only: it
+//! signals the `ns dev` process and probes its process groups.
+#![cfg(unix)]
 
 mod common;
 

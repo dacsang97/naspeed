@@ -1,11 +1,10 @@
-//! `flock` helpers. Locks die with the process, so a killed wrapper never
+//! Whole-file advisory locks (`flock` on Unix, `LockFileEx` on Windows,
+//! through std). Locks die with the process, so a killed wrapper never
 //! leaves a lock behind.
 
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::path::Path;
-
-use rustix::fs::{FlockOperation, flock};
 
 #[derive(Debug)]
 pub struct FileLock {
@@ -17,7 +16,7 @@ impl Drop for FileLock {
     /// another thread holds a copy of the fd until its exec, and closing only
     /// our copy would keep the lock held for that window.
     fn drop(&mut self) {
-        let _ = flock(&self.file, FlockOperation::Unlock);
+        let _ = self.file.unlock();
     }
 }
 
@@ -42,42 +41,43 @@ fn open(path: &Path) -> io::Result<File> {
 /// Block until the lock is held.
 pub fn lock(path: &Path, mode: Mode) -> io::Result<FileLock> {
     let file = open(path)?;
-    let op = match mode {
-        Mode::Shared => FlockOperation::LockShared,
-        Mode::Exclusive => FlockOperation::LockExclusive,
-    };
     loop {
-        match flock(&file, op) {
+        let res = match mode {
+            Mode::Shared => file.lock_shared(),
+            Mode::Exclusive => file.lock(),
+        };
+        match res {
             Ok(()) => return Ok(FileLock { file }),
-            Err(rustix::io::Errno::INTR) => continue,
-            Err(e) => return Err(e.into()),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
         }
+    }
+}
+
+fn held(file: File, res: Result<(), TryLockError>) -> io::Result<Option<FileLock>> {
+    match res {
+        Ok(()) => Ok(Some(FileLock { file })),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(e)) => Err(e),
     }
 }
 
 /// `Ok(None)` when someone else holds a conflicting lock.
 pub fn try_lock(path: &Path, mode: Mode) -> io::Result<Option<FileLock>> {
     let file = open(path)?;
-    let op = match mode {
-        Mode::Shared => FlockOperation::NonBlockingLockShared,
-        Mode::Exclusive => FlockOperation::NonBlockingLockExclusive,
+    let res = match mode {
+        Mode::Shared => file.try_lock_shared(),
+        Mode::Exclusive => file.try_lock(),
     };
-    match flock(&file, op) {
-        Ok(()) => Ok(Some(FileLock { file })),
-        Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
+    held(file, res)
 }
 
 /// Try an exclusive lock on an existing file without creating it (cargo's
 /// own lock files).
 pub fn try_lock_existing(path: &Path) -> io::Result<Option<FileLock>> {
     let file = OpenOptions::new().read(true).write(true).open(path)?;
-    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => Ok(Some(FileLock { file })),
-        Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
+    let res = file.try_lock();
+    held(file, res)
 }
 
 #[cfg(test)]

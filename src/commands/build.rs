@@ -83,10 +83,7 @@ fn final_artifacts(dir: &Path) -> Vec<String> {
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             let is_lib = name.ends_with(".dylib") || name.ends_with(".a");
-            let is_exe = !name.contains('.')
-                && std::os::unix::fs::PermissionsExt::mode(&e.metadata().ok()?.permissions())
-                    & 0o111
-                    != 0;
+            let is_exe = !name.contains('.') && crate::platform::is_executable(&e.metadata().ok()?);
             (is_lib || is_exe).then_some(name)
         })
         .collect();
@@ -232,6 +229,12 @@ pub fn run(args: BuildArgs) -> Result<u8> {
         return universal2(&args);
     }
     if let Some((triple, glibc)) = split_glibc(&args.target) {
+        if cfg!(windows) {
+            bail!(
+                "glibc-pinned builds go through POSIX shell shims and are not supported on Windows hosts; use `cargo zigbuild --target {}`",
+                args.target
+            );
+        }
         return pinned_glibc(&args, triple, glibc);
     }
     bail!(

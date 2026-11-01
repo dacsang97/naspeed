@@ -163,9 +163,7 @@ impl MatrixInput<'_> {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let dest = dir.join(exe_name(build.binary(), target));
         std::fs::copy(&built, &dest).with_context(|| format!("copy {}", built.display()))?;
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
-            .with_context(|| format!("chmod {}", dest.display()))
+        crate::platform::set_mode(&dest, 0o755).with_context(|| format!("chmod {}", dest.display()))
     }
 }
 

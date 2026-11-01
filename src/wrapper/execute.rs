@@ -11,7 +11,6 @@
 
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
@@ -241,10 +240,7 @@ impl Job<'_> {
                 if method != cow_copy::Method::Hardlink {
                     // Clones keep the object's read-only mode; rustc must be
                     // able to overwrite these files on a later rebuild.
-                    std::fs::set_permissions(
-                        &tmp,
-                        std::fs::Permissions::from_mode(o.mode | 0o200),
-                    )?;
+                    crate::platform::set_mode(&tmp, o.mode | 0o200)?;
                     filetime::set_file_mtime(&tmp, FileTime::now())?;
                     let _ = extern_identity::stamp(&tmp, &o.object);
                     let _ = extern_identity::mark_placed(&tmp);
@@ -306,7 +302,13 @@ impl Job<'_> {
     /// For a build script, put naspeed's launcher where cargo expects the
     /// binary so the script's run can be cached too (see `build_script_run`).
     fn install_build_script_launcher(&self, entry: &Entry) {
-        if self.cacheable.kind != UnitKind::BuildScript || !self.settings.build_script_cache {
+        // The launcher is a shell script standing in for the binary; Windows
+        // runs build scripts as `.exe` only, so their runs are not cached
+        // there (their compilation still is).
+        if cfg!(windows)
+            || self.cacheable.kind != UnitKind::BuildScript
+            || !self.settings.build_script_cache
+        {
             return;
         }
         let stem = &self.cacheable.output_stem;
@@ -346,7 +348,8 @@ impl Job<'_> {
         let mut names: Vec<_> = std::fs::read_dir(out_dir)?
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            // A build script's binary is exactly `<stem>`, without extension.
+            // A build script's binary is exactly `<stem>` (`<stem>.exe` on
+            // Windows, which the `<stem>.` prefix already covers).
             .filter(|n| n.starts_with(&plain) || n.starts_with(&lib) || n == stem)
             .collect();
         names.sort();
@@ -372,7 +375,7 @@ impl Job<'_> {
                     text: self.placeholders.encode(&raw),
                 });
             } else {
-                pending.push((name, path, meta.permissions().mode() & 0o777));
+                pending.push((name, path, crate::platform::mode_of(&meta)));
             }
         }
         let has_main_output = match self.cacheable.kind {
@@ -381,8 +384,11 @@ impl Job<'_> {
                     || name.ends_with(".rmeta")
                     || name.ends_with(".dylib")
                     || name.ends_with(".so")
+                    || name.ends_with(".dll")
             }),
-            UnitKind::BuildScript => pending.iter().any(|(name, _, _)| name == stem),
+            UnitKind::BuildScript => pending
+                .iter()
+                .any(|(name, _, _)| *name == crate::platform::exe_name(stem)),
         };
         if !has_main_output {
             bail!("no main output found for {stem}");

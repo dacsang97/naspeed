@@ -49,8 +49,7 @@ pub fn find_llvm() -> Option<LlvmTools> {
 }
 
 pub fn free_bytes(dir: &Path) -> Option<u64> {
-    let st = rustix::fs::statvfs(dir).ok()?;
-    Some(st.f_bavail * st.f_frsize)
+    crate::platform::free_bytes(dir)
 }
 
 pub fn sdk_dir(store_root: &Path) -> PathBuf {

@@ -3,8 +3,8 @@
 [`dacsang97/naspeed-action`](https://github.com/dacsang97/naspeed-action)
 brings naspeed to a workflow in one step:
 
-1. downloads the naspeed release for the runner (Linux and macOS, x64 and
-   arm64), checks its checksum and keeps it in the runner tool cache;
+1. downloads the naspeed release for the runner (Linux, macOS and Windows,
+   x64 and arm64), checks its checksum and keeps it in the runner tool cache;
 2. runs `naspeed setup`, so every later `cargo` call in the job goes through
    naspeed (`ns` is on `PATH` too);
 3. restores the naspeed store from the GitHub Actions cache, and at the end of
@@ -130,7 +130,7 @@ puts naspeed on `PATH` without running `setup` or touching the cache.
 | `args` | | Arguments for naspeed, run after setup and restore, e.g. `test --locked` |
 | `workdir` | `.` | Working directory for `args`, relative to the repository root |
 | `summary` | `true` | Write the naspeed report to the job summary |
-| `store` | `~/.naspeed` | naspeed store directory |
+| `store` | `~/.naspeed` | naspeed store directory; on Windows the default follows the workspace drive (`D:\.naspeed` on hosted runners) |
 | `setup-args` | | Extra arguments for `naspeed setup`, e.g. `--cross --install-targets` |
 | `install-only` | `false` | Only install naspeed; no `naspeed setup`, no cache |
 | `cache` | `true` | Restore the store from the Actions cache (and save it, see `cache-save`) |

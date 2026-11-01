@@ -17,6 +17,8 @@
 //! unreferenced objects alone for a grace period so an in-flight writer's
 //! objects are never collected.
 
+#[cfg(windows)]
+mod block_clone;
 pub mod content_hash;
 pub mod cow_copy;
 pub mod key_lock;
@@ -26,7 +28,6 @@ pub mod usage_log;
 pub mod volume_root;
 
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -268,7 +269,7 @@ impl Store {
         };
         cow_copy::clone_or_copy(src, &tmp, mode)
             .with_context(|| format!("store {}", src.display()))?;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o444))?;
+        crate::platform::set_mode(&tmp, 0o444)?;
         std::fs::rename(&tmp, &dst).inspect_err(|_| {
             let _ = std::fs::remove_file(&tmp);
         })?;
@@ -281,7 +282,7 @@ impl Store {
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(0o444))?;
+        crate::platform::set_mode(tmp, 0o444)?;
         std::fs::rename(tmp, &dst).inspect_err(|_| {
             let _ = std::fs::remove_file(tmp);
         })?;

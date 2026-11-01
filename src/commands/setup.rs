@@ -1,7 +1,6 @@
 //! `naspeed setup`: install the binary, create the store, point cargo at
 //! naspeed. Idempotent; the first pre-naspeed backup is never overwritten.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -39,7 +38,7 @@ fn default_store_for(cwd: &Path, home: &Path) -> Result<PathBuf> {
 
 fn install_binary(dst: &Path) -> Result<bool> {
     let src = std::env::current_exe().context("locate naspeed binary")?;
-    if std::fs::canonicalize(&src).ok() == std::fs::canonicalize(dst).ok() {
+    if crate::platform::canonicalize(&src).ok() == crate::platform::canonicalize(dst).ok() {
         return Ok(false);
     }
     if let Some(parent) = dst.parent() {
@@ -50,8 +49,8 @@ fn install_binary(dst: &Path) -> Result<bool> {
     let tmp = dst.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::copy(&src, &tmp)
         .with_context(|| format!("copy {} → {}", src.display(), tmp.display()))?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
-    std::fs::rename(&tmp, dst)?;
+    crate::platform::set_mode(&tmp, 0o755)?;
+    crate::platform::replace_exe(&tmp, dst)?;
     Ok(true)
 }
 
@@ -66,7 +65,7 @@ pub fn run(args: SetupArgs) -> Result<u8> {
     };
     std::fs::create_dir_all(&store_root)
         .with_context(|| format!("create store {}", store_root.display()))?;
-    let store_root = std::fs::canonicalize(&store_root)?;
+    let store_root = crate::platform::canonicalize(&store_root)?;
     let store = Store::open(&store_root, settings.cow_mode)?;
     let clones = cow_copy::supports_clone(&store.tmp_dir());
     std::fs::write(
@@ -87,9 +86,12 @@ pub fn run(args: SetupArgs) -> Result<u8> {
 
     // Binary on the internal disk.
     let bin = installed_binary();
-    let installed = install_binary(&bin)?;
     let alias = crate::setup::ns_alias();
-    if !crate::setup::install_ns_alias().with_context(|| format!("create {}", alias.display()))? {
+    let alias_was_ours = crate::setup::is_our_ns_alias(&alias);
+    let installed = install_binary(&bin)?;
+    if !crate::setup::install_ns_alias(alias_was_ours)
+        .with_context(|| format!("create {}", alias.display()))?
+    {
         crate::ui_warn!("ns exists and is not naspeed's; run the front-end as `naspeed dev|release|…`";
             path = alias.display());
     }

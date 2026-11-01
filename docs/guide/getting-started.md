@@ -8,9 +8,10 @@ slot pool also caps how many `rustc` run at once.
 ## Requirements
 
 - Rust 1.98 or newer (the repo pins `stable` in `rust-toolchain.toml`).
-- macOS or Linux. Disk savings need a filesystem with clones: APFS, btrfs or
-  xfs. On other filesystems naspeed still speeds builds up but saves no disk
-  (see [Limits](./limits)).
+- macOS, Linux or Windows. Disk savings need a filesystem with clones: APFS,
+  btrfs, xfs, or ReFS (a Windows [Dev Drive](https://learn.microsoft.com/windows/dev-drive/)).
+  On other filesystems (ext4, NTFS) naspeed still speeds builds up but saves
+  no disk (see [Limits](./limits)).
 
 ## Install and set up
 
@@ -18,7 +19,7 @@ Install the binary with one of:
 
 ```sh
 brew install dacsang97/tap/naspeed   # macOS / Linux, prebuilt
-cargo install naspeed --locked       # from crates.io
+cargo install naspeed --locked       # from crates.io (any OS)
 cargo build --release                # from a checkout: ./target/release/naspeed
 ```
 
@@ -34,7 +35,12 @@ volume, pass `--store` with a dir on that volume:
 ```sh
 naspeed setup --store /Volumes/Work/.naspeed   # macOS: projects under /Volumes/Work
 naspeed setup --store /mnt/data/.naspeed       # Linux: projects under /mnt/data
+naspeed setup --store D:\.naspeed              # Windows: projects on the D: Dev Drive
 ```
+
+Windows release archives (`naspeed-<tag>-x86_64-pc-windows-msvc.zip`, and
+`aarch64`) are on the [GitHub releases](https://github.com/dacsang97/naspeed/releases)
+page; unzip and run `naspeed.exe setup`.
 
 Run it once per volume to add more stores; each `setup` keeps the earlier ones.
 
@@ -45,7 +51,9 @@ or a new `cargo install`, run `naspeed setup` again to refresh that copy.
 
 1. Copies the binary to `~/.cargo/bin/naspeed` on the internal disk, so cargo
    never points at a volume that might be unplugged. It also creates
-   `~/.cargo/bin/ns`, a symlink used by the [ns front-end](./ns).
+   `~/.cargo/bin/ns`, a symlink used by the [ns front-end](./ns). On Windows
+   these are `naspeed.exe` and `ns.exe` (a hard link, since symlinks need
+   Developer Mode) under `%USERPROFILE%\.cargo\bin`.
 2. Backs up `~/.cargo/config.toml` into `~/.config/naspeed/backups/`. The first
    backup, `config.toml.before-naspeed`, is never overwritten.
 3. Edits the config with comments kept: sets `build.rustc-wrapper` to the

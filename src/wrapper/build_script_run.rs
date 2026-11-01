@@ -24,7 +24,6 @@
 
 use std::ffi::OsString;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -160,7 +159,7 @@ pub fn install_launcher(binary: &Path, binary_hash: &str) -> Result<()> {
         h = shell_quote(binary_hash),
     );
     std::fs::write(binary, script)?;
-    std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o755))?;
+    crate::platform::set_mode(binary, 0o755)?;
     let _ = extern_identity::mark_placed(binary);
     Ok(())
 }
@@ -434,7 +433,7 @@ impl<'a> Run<'a> {
             }
             cow_copy::clone_or_copy(&self.store.object_path(&o.object), &dst, self.cow_mode)?;
             if self.cow_mode != crate::config::CowMode::Hardlink {
-                std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(o.mode | 0o200))?;
+                crate::platform::set_mode(&dst, o.mode | 0o200)?;
                 filetime::set_file_mtime(&dst, filetime::FileTime::now())?;
             }
         }
@@ -450,7 +449,7 @@ impl<'a> Run<'a> {
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::os::unix::fs::symlink(self.placeholders.decode(target), &dst)?;
+            crate::platform::symlink(self.placeholders.decode(target), &dst)?;
         }
         Ok(())
     }
@@ -567,7 +566,7 @@ impl<'a> Run<'a> {
                     name: rel,
                     object,
                     size,
-                    mode: meta.permissions().mode() & 0o777,
+                    mode: crate::platform::mode_of(&meta),
                 });
             }
         }
