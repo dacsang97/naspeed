@@ -45,7 +45,7 @@ pnpm --dir docs run build   # static site in docs/.vitepress/
 
 | Workflow | Trigger | Jobs |
 |---|---|---|
-| `ci.yml` | pull requests, called by `release.yml`, run by hand | `ns check` (rustfmt and clippy) and unit tests with this commit's naspeed installed by its own `naspeed setup` (`ns test --lib --bins`, plus the setup and wrapper suites on Windows) on Linux, macOS and Windows · `cargo publish --dry-run` |
+| `ci.yml` | pull requests, called by `release.yml`, run by hand | `ns check` (rustfmt and clippy) and `ns test --lib --bins` (plus the setup and wrapper suites on Windows) on Linux, macOS and Windows · `cargo publish --dry-run` |
 | `release.yml` | push to `main` | `ci.yml`, then release-plz: open or update the Release PR; after it merges, publish to crates.io, tag `v<version>`, create the GitHub release and call `release-binaries.yml` |
 | `release-binaries.yml` | called by `release.yml`, or run by hand with an existing tag | build `naspeed-<tag>-<target>.tar.gz` for macOS (arm64, x86_64) and Linux musl (arm64, x86_64), attach them to the release, update `naspeed.rb` in `dacsang97/homebrew-tap` |
 | `docs.yml` | push to `main` touching `docs/**` | VitePress build → GitHub Pages |

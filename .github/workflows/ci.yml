@@ -70,13 +70,10 @@ jobs:
       - uses: dacsang97/naspeed-action@v1
         with:
           cache-key: test
-      # Build this commit's naspeed (through the released one), then let it
-      # install itself as `naspeed`/`ns` and take over the cargo wrapper, so
-      # the PR's setup, wrapper, test runner and tracer are the ones tested.
       # Unit tests, plus the input tracking suite: the rest of tests/ needs
       # Docker, zig and reflink filesystems that hosted runners do not provide.
-      - run: cargo build --locked --bin naspeed
-      - run: ./target/debug/naspeed setup
+      # The integration suites run this commit's naspeed binary (cargo builds
+      # it for them), so the tracer and wrapper under test are the PR's.
       - run: ns test --locked --lib --bins --test test_input_tracking
       # Windows also runs setup/uninstall and the wrapper end to end (store,
       # restore into a second target dir, freshness) on the fixture
