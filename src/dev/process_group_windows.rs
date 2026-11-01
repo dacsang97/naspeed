@@ -136,11 +136,9 @@ impl GroupChild {
                 std::ptr::null_mut(),
             )
         };
-        let alive = if ok != 0 {
-            info.ActiveProcesses > 0
-        } else {
-            matches!(self.try_wait(), Ok(None))
-        };
+        // The leader counts even if it never made it into the job.
+        let leader_running = matches!(self.try_wait(), Ok(None));
+        let alive = leader_running || (ok != 0 && info.ActiveProcesses > 0);
         if !alive {
             self.group_gone = true;
         }
@@ -150,9 +148,14 @@ impl GroupChild {
     /// Ctrl-Break to the group, wait up to `grace` for every member to exit,
     /// then terminate the job. Returns the leader's exit status.
     pub fn stop(&mut self, grace: Duration) -> Option<ExitStatus> {
-        // SAFETY: the group id is the leader's pid (CREATE_NEW_PROCESS_GROUP).
-        // Fails harmlessly when there is no shared console.
-        unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.child.id()) };
+        if !self.group_alive() {
+            return self.status;
+        }
+        // SAFETY: the group id is the leader's pid (CREATE_NEW_PROCESS_GROUP),
+        // which is still running here. Fails harmlessly without a console.
+        if matches!(self.try_wait(), Ok(None)) {
+            unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.child.id()) };
+        }
         let deadline = Instant::now() + grace;
         loop {
             let _ = self.try_wait();

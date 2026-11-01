@@ -11,9 +11,10 @@ use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 
 use filetime::FileTime;
+use windows_sys::Win32::Foundation::FILETIME;
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
-    GetDiskFreeSpaceExW, GetFileInformationByHandle,
+    GetDiskFreeSpaceExW, GetFileInformationByHandle, SetFileTime,
 };
 use windows_sys::Win32::System::Threading::{
     BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, SetPriorityClass,
@@ -85,28 +86,45 @@ fn remove_stale_asides(path: &Path) {
 /// Moves `path` aside when it cannot be replaced or deleted because it is
 /// running: Windows forbids deleting a running executable but allows
 /// renaming it.
-fn move_aside(path: &Path) -> io::Result<()> {
-    let mut n = 0;
-    loop {
-        match std::fs::rename(path, aside_path(path, n)) {
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < 16 => n += 1,
-            other => return other,
-        }
-    }
+fn move_aside(path: &Path) -> io::Result<std::path::PathBuf> {
+    let aside = aside_path(path, 0);
+    std::fs::rename(path, &aside)?;
+    Ok(aside)
 }
 
 /// Puts `tmp` at `dst`, even while `dst` is running (it is moved aside).
+/// If that still fails, the old `dst` is put back: cargo points at it.
 pub fn replace_exe(tmp: &Path, dst: &Path) -> io::Result<()> {
     remove_stale_asides(dst);
     if std::fs::rename(tmp, dst).is_ok() {
         return Ok(());
     }
-    if dst.exists() {
-        move_aside(dst)?;
+    let aside = if dst.exists() {
+        Some(move_aside(dst)?)
+    } else {
+        None
+    };
+    if let Err(e) = std::fs::rename(tmp, dst) {
+        if let Some(aside) = aside {
+            let _ = std::fs::rename(aside, dst);
+        }
+        return Err(e);
     }
-    std::fs::rename(tmp, dst)?;
     remove_stale_asides(dst);
     Ok(())
+}
+
+/// Deletes a file; a read-only one too, on filesystems (FAT) where std
+/// cannot delete it without clearing the attribute first.
+pub fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref();
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            set_mode(path, 0o644)?;
+            std::fs::remove_file(path)
+        }
+        other => other,
+    }
 }
 
 /// Deletes an executable, moving it aside first if it is running.
@@ -186,17 +204,32 @@ pub fn get_attr(path: &Path, name: &str) -> Option<Vec<u8>> {
     (data.len() <= 256).then_some(data)
 }
 
-/// Writes the stream, then puts the file's times back: writing a stream
-/// bumps the file's mtime, and cargo's freshness checks compare mtimes.
+/// Writes the stream through a handle whose timestamp updates are frozen:
+/// writing a stream would otherwise bump the file's mtime, and cargo's
+/// freshness checks compare mtimes. Times are put back only if a filesystem
+/// ignored the freeze.
 pub fn set_attr(path: &Path, name: &str, value: &[u8]) -> io::Result<()> {
+    use std::io::Write;
     let before = std::fs::metadata(path)?;
     if !before.is_file() {
         return Err(io::Error::from(io::ErrorKind::Unsupported));
     }
-    std::fs::write(stream_path(path, name), value)?;
-    filetime::set_file_times(
-        path,
-        FileTime::from_last_access_time(&before),
-        FileTime::from_last_modification_time(&before),
-    )
+    let mut stream = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(stream_path(path, name))?;
+    let frozen = FILETIME {
+        dwLowDateTime: u32::MAX,
+        dwHighDateTime: u32::MAX,
+    };
+    // SAFETY: valid handle; all-ones FILETIME means "stop updating this".
+    unsafe { SetFileTime(stream.as_raw_handle(), std::ptr::null(), &frozen, &frozen) };
+    stream.write_all(value)?;
+    drop(stream);
+    let mtime = FileTime::from_last_modification_time(&before);
+    if FileTime::from_last_modification_time(&std::fs::metadata(path)?) != mtime {
+        filetime::set_file_times(path, FileTime::from_last_access_time(&before), mtime)?;
+    }
+    Ok(())
 }

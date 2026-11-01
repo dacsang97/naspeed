@@ -22,7 +22,7 @@ pub struct Placeholders {
 
 fn variants(path: &Path) -> Vec<String> {
     let mut out = vec![path.to_string_lossy().trim_end_matches('/').to_owned()];
-    if let Ok(canonical) = std::fs::canonicalize(path) {
+    if let Ok(canonical) = crate::platform::canonicalize(path) {
         let canonical = canonical.to_string_lossy().trim_end_matches('/').to_owned();
         if !out.contains(&canonical) {
             out.push(canonical);

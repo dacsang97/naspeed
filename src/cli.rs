@@ -39,9 +39,10 @@ pub const NS_ALIAS: &str = "ns";
 /// parses its arguments as a CLI, never as a `RUSTC_WRAPPER` call, so a typo
 /// like `ns rustc` errors instead of compiling something.
 pub fn invoked_as_ns(argv0: &std::ffi::OsStr) -> bool {
-    std::path::Path::new(argv0)
-        .file_stem()
-        .is_some_and(|stem| stem == NS_ALIAS)
+    std::path::Path::new(argv0).file_stem().is_some_and(|stem| {
+        // File names are case-insensitive on Windows (`NS.EXE`).
+        stem == NS_ALIAS || (cfg!(windows) && stem.eq_ignore_ascii_case(NS_ALIAS))
+    })
 }
 
 /// Wrapper mode is anything cargo passes as `argv[1]` (bare `rustc`, a path

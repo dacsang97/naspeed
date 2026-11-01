@@ -333,7 +333,14 @@ pub fn tier2(tier1: &str, deps: &[String], env: &Env, ph: &Placeholders, cwd: &P
             h.field(dep, &content);
             continue;
         }
-        match env.get(dep.as_str()) {
+        // Windows names are case-insensitive and `Env` keys are upper-cased
+        // there, while rustc records the name as the source spelled it.
+        let name = if cfg!(windows) {
+            dep.to_uppercase()
+        } else {
+            dep.clone()
+        };
+        match env.get(name.as_str()) {
             Some(value) => h.field(&format!("env-dep:{dep}"), &ph.encode(value)),
             None => h.field(&format!("env-dep-unset:{dep}"), ""),
         }

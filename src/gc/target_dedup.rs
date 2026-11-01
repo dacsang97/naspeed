@@ -67,13 +67,15 @@ fn replace_with_clone(keeper: &Path, dup: &Path) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(std::io::Error::other("volume does not support clones"));
     }
-    std::fs::set_permissions(&tmp, meta.permissions())?;
     copy_xattrs(dup, &tmp);
+    // Times before the mode: setting times needs write access, which a
+    // read-only mode takes away on Windows.
     filetime::set_file_times(
         &tmp,
         FileTime::from_last_access_time(&meta),
         FileTime::from_last_modification_time(&meta),
     )?;
+    std::fs::set_permissions(&tmp, meta.permissions())?;
     std::fs::rename(&tmp, dup).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })

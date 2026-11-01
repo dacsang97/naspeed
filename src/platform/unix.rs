@@ -27,6 +27,11 @@ pub fn replace_exe(tmp: &Path, dst: &Path) -> io::Result<()> {
     std::fs::rename(tmp, dst)
 }
 
+/// Deletes a file, read-only or not.
+pub fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
+    std::fs::remove_file(path)
+}
+
 pub fn remove_exe(path: &Path) -> io::Result<()> {
     std::fs::remove_file(path)
 }

@@ -39,6 +39,7 @@ impl Home {
             .env("NO_COLOR", "1")
             .args(args)
             .env("HOME", &self.home)
+            .env("USERPROFILE", &self.home)
             .env("CARGO_HOME", &self.cargo_home)
             .env("NASPEED_CONFIG_DIR", &self.config)
             .env_remove("RUSTC_WRAPPER")

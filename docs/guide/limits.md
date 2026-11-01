@@ -21,7 +21,9 @@
   of SIGTERM/SIGKILL. `setup --cross` and `naspeed build <triple>.<glibc>`
   need POSIX shell shims, so they are not available on Windows hosts, and
   `ns release` `before` hooks run with `sh` (Git for Windows provides it).
-  The xattr memos live in NTFS/ReFS alternate data streams.
+  The xattr memos live in NTFS/ReFS alternate data streams. `cow_mode =
+  "hardlink"` acts as `auto` there: hard links share the read-only attribute
+  of store objects, so rustc could not overwrite them.
 - The msvc target needs LLVM (`clang-cl`, `lld-link`, `llvm-lib`) and `xwin`.
   The Microsoft CRT and SDK are only downloaded after `--accept-msvc-license`,
   into `<store>/xwin`.

@@ -73,7 +73,7 @@ pub fn run(
         else {
             // Unreadable entry: it can never hit, remove it.
             if !dry_run {
-                let _ = std::fs::remove_file(&path);
+                let _ = crate::platform::remove_file(&path);
             }
             continue;
         };
@@ -182,23 +182,23 @@ pub fn run(
         return Ok(report);
     }
     for (key, path) in &evicted {
-        let _ = std::fs::remove_file(path);
+        let _ = crate::platform::remove_file(path);
         conn.execute("DELETE FROM entries WHERE key = ?1", params![key])?;
     }
     for name in &removed_objects {
         if let Some((path, _)) = sizes.get(name) {
-            let _ = std::fs::remove_file(path);
+            let _ = crate::platform::remove_file(path);
         }
     }
     for path in stale_tmp.into_iter().chain(test_results) {
-        let _ = std::fs::remove_file(path);
+        let _ = crate::platform::remove_file(path);
     }
     // No wrapper holds a key lock while we hold the exclusive store lock,
     // so lock files can go without breaking mutual exclusion.
     let mut locks = Vec::new();
     walk_files(&store.root.join("locks"), &mut locks);
     for path in locks {
-        let _ = std::fs::remove_file(path);
+        let _ = crate::platform::remove_file(path);
     }
     // Manifests whose tier-1 key has no entry left.
     let live_tier1: HashSet<&str> = entries
@@ -214,7 +214,7 @@ pub fn run(
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         if !live_tier1.contains(tier1.as_str()) && older_than(&path, grace) {
-            let _ = std::fs::remove_file(path);
+            let _ = crate::platform::remove_file(path);
         }
     }
     Ok(report)

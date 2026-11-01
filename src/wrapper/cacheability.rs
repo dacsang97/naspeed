@@ -168,7 +168,7 @@ pub fn check(
 pub fn source_root(input: &Path, cargo_home: &Path) -> Option<(SourceKind, PathBuf)> {
     let homes = [
         cargo_home.to_path_buf(),
-        std::fs::canonicalize(cargo_home).unwrap_or_else(|_| cargo_home.to_path_buf()),
+        crate::platform::canonicalize(cargo_home).unwrap_or_else(|_| cargo_home.to_path_buf()),
     ];
     for home in &homes {
         for (kind, sub) in [
