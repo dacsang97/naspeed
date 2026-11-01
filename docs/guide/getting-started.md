@@ -79,7 +79,8 @@ prebuilt archive from the [GitHub releases](https://github.com/dacsang97/naspeed
 In PowerShell:
 
 ```powershell
-$v = "v0.5.0"                    # the release to install
+# The latest release; set $v = "v0.5.0" to pin one.
+$v = (Invoke-RestMethod https://api.github.com/repos/dacsang97/naspeed/releases/latest).tag_name
 $t = "x86_64-pc-windows-msvc"    # aarch64-pc-windows-msvc on ARM machines
 $name = "naspeed-$v-$t"
 Invoke-WebRequest "https://github.com/dacsang97/naspeed/releases/download/$v/$name.zip" -OutFile "$name.zip"
