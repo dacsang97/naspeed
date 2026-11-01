@@ -57,10 +57,7 @@ jobs:
         with:
           components: clippy
       # naspeed caches its own build; only pushes to main save the store.
-      # Windows runners build without it until a release ships Windows
-      # binaries for the action to install.
-      - if: runner.os != 'Windows'
-        uses: dacsang97/naspeed-action@v1
+      - uses: dacsang97/naspeed-action@v1
         with:
           cache-key: clippy
       - run: cargo clippy --locked --all-targets -- -D warnings
@@ -79,9 +76,8 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       # The released naspeed caches the build; only pushes to main save the
-      # store. Not on Windows yet (no released Windows binary).
-      - if: runner.os != 'Windows'
-        uses: dacsang97/naspeed-action@v1
+      # store.
+      - uses: dacsang97/naspeed-action@v1
         with:
           cache-key: test
       # The tests run under the naspeed built from this commit, so its test
