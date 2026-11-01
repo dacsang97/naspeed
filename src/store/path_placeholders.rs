@@ -86,10 +86,29 @@ impl Placeholders {
 
     /// Tokens → this target dir's paths (first, i.e. as-given, variant).
     pub fn decode(&self, text: &str) -> String {
+        self.decode_with(text, str::to_owned)
+    }
+
+    /// `decode` for a rustc dep-info file: `# env-dep:NAME=value` lines hold
+    /// escaped values (`\\` for a backslash), so a Windows path must go back
+    /// escaped there, or cargo rejects the file as unparseable.
+    pub fn decode_dep_info(&self, text: &str) -> String {
+        text.split_inclusive('\n')
+            .map(|line| {
+                if line.starts_with("# env-dep:") {
+                    self.decode_with(line, |p| p.replace('\\', "\\\\").replace('\n', "\\n"))
+                } else {
+                    self.decode(line)
+                }
+            })
+            .collect()
+    }
+
+    fn decode_with(&self, text: &str, escape: impl Fn(&str) -> String) -> String {
         let mut out = text.to_owned();
         for token in [PROFILE_TOKEN, CARGO_HOME_TOKEN, WORKSPACE_TOKEN] {
             if let Some(path) = self.primary(token) {
-                out = out.replace(token, path);
+                out = out.replace(token, &escape(path));
             }
         }
         out
@@ -97,13 +116,7 @@ impl Placeholders {
 
     /// `decode` for text inside JSON string literals.
     pub fn decode_json(&self, text: &str) -> String {
-        let mut out = text.to_owned();
-        for token in [PROFILE_TOKEN, CARGO_HOME_TOKEN, WORKSPACE_TOKEN] {
-            if let Some(path) = self.primary(token) {
-                out = out.replace(token, &json_escape(path));
-            }
-        }
-        out
+        self.decode_with(text, json_escape)
     }
 
     fn primary(&self, token: &str) -> Option<&str> {
@@ -151,6 +164,22 @@ fn json_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dep_info_env_values_stay_escaped() {
+        let from = Placeholders::new(Path::new(r"D:\w\t1\debug"), Path::new(r"C:\h\.cargo"));
+        let to = Placeholders::new(Path::new(r"D:\w\t2\debug"), Path::new(r"C:\h\.cargo"));
+        let raw = "D:\\w\\t1\\debug\\deps\\x.d: C:\\h\\.cargo\\src\\lib.rs\n\n# env-dep:OUT_DIR=D:\\\\w\\\\t1\\\\debug\\\\build\\\\out\n";
+        let restored = to.decode_dep_info(&from.encode(raw));
+        assert_eq!(
+            restored,
+            "D:\\w\\t2\\debug\\deps\\x.d: C:\\h\\.cargo\\src\\lib.rs\n\n# env-dep:OUT_DIR=D:\\\\w\\\\t2\\\\debug\\\\build\\\\out\n"
+        );
+        // Unix paths have nothing to escape: same as `decode`.
+        let unix = Placeholders::new(Path::new("/w/t/debug"), Path::new("/h/.cargo"));
+        let text = "# env-dep:OUT_DIR=@NASPEED_PROFILE_DIR@/build/out\n";
+        assert_eq!(unix.decode_dep_info(text), unix.decode(text));
+    }
 
     fn ph(profile: &str) -> Placeholders {
         Placeholders::new(Path::new(profile), Path::new("/home/dev/.cargo"))

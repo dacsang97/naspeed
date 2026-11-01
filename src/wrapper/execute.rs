@@ -248,7 +248,7 @@ impl Job<'_> {
             }
             if let Some(dep) = &entry.dep_info {
                 let tmp = out_dir.join(format!(".naspeed-{pid}-{}", dep.name));
-                std::fs::write(&tmp, self.placeholders.decode(&dep.text))?;
+                std::fs::write(&tmp, self.placeholders.decode_dep_info(&dep.text))?;
                 let _ = extern_identity::mark_placed(&tmp);
                 staged.push((tmp, out_dir.join(&dep.name)));
             }
