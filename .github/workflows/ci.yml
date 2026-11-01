@@ -28,21 +28,8 @@ defaults:
     shell: bash
 
 jobs:
-  fmt:
-    name: fmt
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-          ref: ${{ inputs.ref || github.sha }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --all --check
-
-  clippy:
-    name: clippy (${{ matrix.os }})
+  check:
+    name: check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -55,15 +42,15 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
-      # naspeed caches its own build; only pushes to main save the store.
-      # Windows runners build without it until a release ships Windows
-      # binaries for the action to install.
-      - if: runner.os != 'Windows'
-        uses: dacsang97/naspeed-action@v1
+          components: clippy, rustfmt
+      # The released naspeed caches its own build; only pushes to main save
+      # the store.
+      - uses: dacsang97/naspeed-action@v1
         with:
-          cache-key: clippy
-      - run: cargo clippy --locked --all-targets -- -D warnings
+          cache-key: check
+      # rustfmt --check, then clippy -D warnings on every target (which also
+      # type-checks the integration tests the test job does not run).
+      - run: ns check --locked
 
   test:
     name: test (${{ matrix.os }})
@@ -79,27 +66,22 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       # The released naspeed caches the build; only pushes to main save the
-      # store. Not on Windows yet (no released Windows binary).
-      - if: runner.os != 'Windows'
-        uses: dacsang97/naspeed-action@v1
+      # store.
+      - uses: dacsang97/naspeed-action@v1
         with:
           cache-key: test
-      # The tests run under the naspeed built from this commit, so its test
-      # runner and tracer are the ones being tested (a released naspeed would
-      # test the PR with last release's runner). Unit tests, plus the input
-      # tracking suite: the rest of tests/ needs Docker, zig and reflink
-      # filesystems that hosted runners do not provide.
-      - run: cargo build --locked --bin naspeed
-      - run: ./target/debug/naspeed test --locked --lib --bins --test test_input_tracking
+      # Unit tests, plus the input tracking suite: the rest of tests/ needs
+      # Docker, zig and reflink filesystems that hosted runners do not provide.
+      # The integration suites run this commit's naspeed binary (cargo builds
+      # it for them), so the tracer and wrapper under test are the PR's.
+      - run: ns test --locked --lib --bins --test test_input_tracking
       # Windows also runs setup/uninstall and the wrapper end to end (store,
       # restore into a second target dir, freshness) on the fixture
       # workspace, whose registry crates the tests build offline.
       - if: runner.os == 'Windows'
         run: cargo fetch --locked --manifest-path tests/fixtures/sample_workspace/Cargo.toml
       - if: runner.os == 'Windows'
-        run: ./target/debug/naspeed test --locked --test setup_uninstall --test materialize_integration
-      # Also compiles the other integration tests, through the same store.
-      - run: cargo check --locked --all-targets
+        run: ns test --locked --test setup_uninstall --test materialize_integration
 
   package:
     name: package

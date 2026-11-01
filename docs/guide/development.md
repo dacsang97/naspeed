@@ -4,9 +4,8 @@
 
 ```sh
 cargo build --release
-cargo test
-cargo fmt --all --check
-cargo clippy --locked --all-targets -- -D warnings
+ns test
+ns check   # cargo fmt --check, then clippy -D warnings on every target
 ```
 
 Integration tests live in `tests/` (setup/uninstall, materialize, gc, peer
@@ -46,12 +45,12 @@ pnpm --dir docs run build   # static site in docs/.vitepress/
 
 | Workflow | Trigger | Jobs |
 |---|---|---|
-| `ci.yml` | pull requests, called by `release.yml`, run by hand | `cargo fmt --check` · `cargo clippy -D warnings`, `cargo check` and unit tests (`naspeed test --lib --bins`) on Linux and macOS · `cargo publish --dry-run` |
+| `ci.yml` | pull requests, called by `release.yml`, run by hand | `ns check` (rustfmt and clippy) and `ns test --lib --bins` (plus the setup and wrapper suites on Windows) on Linux, macOS and Windows · `cargo publish --dry-run` |
 | `release.yml` | push to `main` | `ci.yml`, then release-plz: open or update the Release PR; after it merges, publish to crates.io, tag `v<version>`, create the GitHub release and call `release-binaries.yml` |
 | `release-binaries.yml` | called by `release.yml`, or run by hand with an existing tag | build `naspeed-<tag>-<target>.tar.gz` for macOS (arm64, x86_64) and Linux musl (arm64, x86_64), attach them to the release, update `naspeed.rb` in `dacsang97/homebrew-tap` |
 | `docs.yml` | push to `main` touching `docs/**` | VitePress build → GitHub Pages |
 
-The clippy, test and package jobs build through the released naspeed itself,
+The check, test and package jobs build through the released naspeed itself,
 installed by [naspeed-action](https://github.com/dacsang97/naspeed-action),
 which carries the store in the GitHub Actions cache (one `cache-key` per job).
 Only pushes to `main` save it; pull requests restore it read-only.
