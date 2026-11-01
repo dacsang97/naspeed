@@ -374,7 +374,9 @@ pub fn changed<'a>(inputs: &'a [Input], env: &Env) -> Option<&'a Input> {
 mod tests {
     use super::*;
 
+    // Tracer logs (and the paths in them) come from Unix only.
     #[test]
+    #[cfg(unix)]
     fn log_becomes_inputs_without_system_or_target_paths() {
         // Not under the temp dir: temp paths are excluded on purpose.
         let base = Path::new(env!("CARGO_MANIFEST_DIR"))

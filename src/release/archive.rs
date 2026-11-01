@@ -128,7 +128,10 @@ fn write_zip<W: Write + std::io::Seek>(
     let stamp = dos_time(mtime);
     let base = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
-        .last_modified_time(stamp);
+        .last_modified_time(stamp)
+        // Unix attributes on every host: a zip built on Windows would
+        // otherwise be marked DOS and lose the executable bits.
+        .system(zip::System::Unix);
     let mut zip = zip::ZipWriter::new(out);
     for (path, node) in nodes {
         match node {
