@@ -73,24 +73,29 @@ naspeed, whether it comes from a shell, an IDE, rust-analyzer or an agent.
 
 ### Windows
 
-Install Rust with rustup and the MSVC toolchain first. Then either build from
-crates.io (`cargo install naspeed --locked`, then `naspeed setup`) or use the
-prebuilt archive from the [GitHub releases](https://github.com/dacsang97/naspeed/releases).
-In PowerShell:
+Install Rust with rustup and the MSVC toolchain first. Then, in PowerShell:
 
 ```powershell
-# The latest release; set $v = "v0.5.0" to pin one.
-$v = (Invoke-RestMethod https://api.github.com/repos/dacsang97/naspeed/releases/latest).tag_name
-$t = "x86_64-pc-windows-msvc"    # aarch64-pc-windows-msvc on ARM machines
-$name = "naspeed-$v-$t"
-Invoke-WebRequest "https://github.com/dacsang97/naspeed/releases/download/$v/$name.zip" -OutFile "$name.zip"
-Invoke-WebRequest "https://github.com/dacsang97/naspeed/releases/download/$v/$name.zip.sha256" -OutFile "$name.zip.sha256"
-# The two hashes must match.
-(Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
-(Get-Content "$name.zip.sha256").Split(" ")[0]
-Expand-Archive "$name.zip" -DestinationPath .
-& ".\$name\naspeed.exe" setup --store D:\.naspeed   # a store on the drive that holds your code
+irm https://dacsang97.github.io/naspeed/install.ps1 | iex
 ```
+
+The [script](https://github.com/dacsang97/naspeed/blob/main/docs/public/install.ps1)
+downloads the latest release zip for your CPU (x86_64 or ARM64) into a temp
+folder, checks its SHA-256, runs `naspeed.exe setup` and removes the folder. To
+put the store on the drive that holds your code, set `NASPEED_STORE` on the same
+line (and `NASPEED_VERSION = "v0.5.0"` to pin a release):
+
+```powershell
+$env:NASPEED_STORE = "D:\.naspeed"; irm https://dacsang97.github.io/naspeed/install.ps1 | iex
+```
+
+Paste each command as one line: some consoles run a multi-line paste out of
+order.
+
+Without the script: `cargo install naspeed --locked` then `naspeed setup`, or
+unzip `naspeed-<tag>-<arch>-pc-windows-msvc.zip` from the
+[releases](https://github.com/dacsang97/naspeed/releases) and run
+`naspeed-<tag>-<arch>-pc-windows-msvc\naspeed.exe setup`.
 
 `setup` copies `naspeed.exe` and `ns.exe` into `%USERPROFILE%\.cargo\bin`, so
 the unzipped folder can be deleted afterwards. Without `--store`, the store goes
