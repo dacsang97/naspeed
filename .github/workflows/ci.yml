@@ -70,20 +70,21 @@ jobs:
       - uses: dacsang97/naspeed-action@v1
         with:
           cache-key: test
-      # The tests run under the naspeed built from this commit (not the
-      # released `ns`), so its test runner and tracer are the ones being
-      # tested. The build itself goes through the released naspeed. Unit tests, plus the input
-      # tracking suite: the rest of tests/ needs Docker, zig and reflink
-      # filesystems that hosted runners do not provide.
+      # Build this commit's naspeed (through the released one), then let it
+      # install itself as `naspeed`/`ns` and take over the cargo wrapper, so
+      # the PR's setup, wrapper, test runner and tracer are the ones tested.
+      # Unit tests, plus the input tracking suite: the rest of tests/ needs
+      # Docker, zig and reflink filesystems that hosted runners do not provide.
       - run: cargo build --locked --bin naspeed
-      - run: ./target/debug/naspeed test --locked --lib --bins --test test_input_tracking
+      - run: ./target/debug/naspeed setup
+      - run: ns test --locked --lib --bins --test test_input_tracking
       # Windows also runs setup/uninstall and the wrapper end to end (store,
       # restore into a second target dir, freshness) on the fixture
       # workspace, whose registry crates the tests build offline.
       - if: runner.os == 'Windows'
         run: cargo fetch --locked --manifest-path tests/fixtures/sample_workspace/Cargo.toml
       - if: runner.os == 'Windows'
-        run: ./target/debug/naspeed test --locked --test setup_uninstall --test materialize_integration
+        run: ns test --locked --test setup_uninstall --test materialize_integration
 
   package:
     name: package
