@@ -79,6 +79,7 @@ pub(super) fn query(_timeout: Duration) -> Option<(u8, u8, u8)> {
 
 /// `ESC ] 11 ; rgb:RRRR/GGGG/BBBB` ended by BEL or `ESC \`; each channel
 /// has 1–4 hex digits.
+#[cfg(any(unix, test))]
 fn parse_reply(reply: &[u8]) -> Option<(u8, u8, u8)> {
     let text = std::str::from_utf8(reply).ok()?;
     let body = &text[text.find("]11;rgb:")? + "]11;rgb:".len()..];
