@@ -157,7 +157,7 @@ impl DevLoop<'_> {
     }
 
     fn cargo(&self, args: &[String], pending: &mut BTreeSet<PathBuf>) -> Result<CargoOutcome> {
-        run_cargo(&self.settings.root, args, || {
+        run_cargo(&self.settings.root, args, &self.bus, || {
             let _ = self.watcher.drain(pending);
             shutdown_requested()
         })
@@ -196,14 +196,8 @@ impl DevLoop<'_> {
     }
 }
 
+/// cargo's stderr (manifest or lock errors without a compiler diagnostic) was
+/// already streamed to the build log while cargo ran.
 fn report_failure(bus: &LogBus, step: &str, out: &CargoOutcome, started: Instant) {
-    if out.errors.is_empty() {
-        let lines: Vec<&str> = out.stderr.lines().collect();
-        bus.log(
-            super::log_bus::LogSource::Build,
-            super::log_bus::Stream::Stderr,
-            lines[lines.len().saturating_sub(20)..].join("\n"),
-        );
-    }
     status_line::compile_errors(bus, step, &out.errors, started.elapsed());
 }

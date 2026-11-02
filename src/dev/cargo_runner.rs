@@ -1,7 +1,9 @@
 //! Runs `cargo check` / `cargo build` with JSON messages: collects rendered
 //! compiler errors and the built executable, while the caller keeps polling
 //! (to record file changes as "dirty" and to honor Ctrl-C) instead of
-//! blocking on cargo.
+//! blocking on cargo. cargo's own stderr (`Checking`/`Compiling` progress,
+//! build-script warnings, manifest errors) streams live to the build log, so
+//! a cold workspace shows what it is compiling instead of sitting silent.
 
 use std::io::{BufRead, BufReader, IsTerminal, Read};
 use std::path::{Path, PathBuf};
@@ -12,6 +14,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
+use super::line_reader;
+use super::log_bus::{LogBus, LogSource, Stream};
 use super::process_supervisor::{GroupChild, STOP_GRACE};
 
 /// `cargo` from `$CARGO` (set when run under cargo) or `PATH`.
@@ -36,9 +40,6 @@ pub struct CargoOutcome {
     pub errors: Vec<String>,
     /// Executables produced by bin targets: (target name, path).
     pub executables: Vec<(String, PathBuf)>,
-    /// cargo's own stderr, for failures that carry no compiler diagnostic
-    /// (bad manifest, unknown package, lock contention errors...).
-    pub stderr: String,
     /// The caller aborted the run (shutdown requested).
     pub interrupted: bool,
 }
@@ -93,11 +94,13 @@ fn spawn_reader<R: Read + Send + 'static, T: Send + 'static>(
     })
 }
 
-/// Runs `cargo <args>` in `root`. `tick` is called every few milliseconds
-/// while cargo runs; returning `true` aborts the run (whole process group).
+/// Runs `cargo <args>` in `root`, streaming cargo's stderr to `bus` as build
+/// lines. `tick` is called every few milliseconds while cargo runs; returning
+/// `true` aborts the run (whole process group).
 pub fn run_cargo(
     root: &Path,
     args: &[String],
+    bus: &LogBus,
     mut tick: impl FnMut() -> bool,
 ) -> Result<CargoOutcome> {
     let mut cmd = cargo_command();
@@ -114,14 +117,7 @@ pub fn run_cargo(
         |acc: &mut Messages, line| parse_message(&line, acc),
         Messages::default(),
     );
-    let stderr_text = spawn_reader(
-        stderr,
-        |acc: &mut String, line| {
-            acc.push_str(&line);
-            acc.push('\n');
-        },
-        String::new(),
-    );
+    let stderr = line_reader::spawn(stderr, bus.clone(), LogSource::Build, Stream::Stderr);
 
     let mut interrupted = false;
     let status = loop {
@@ -137,12 +133,11 @@ pub fn run_cargo(
     // Leftover members (e.g. a stuck build script) must not hold the pipes open.
     child.stop(STOP_GRACE);
     let messages = messages.join().unwrap_or_default();
-    let stderr = stderr_text.join().unwrap_or_default();
+    let _ = stderr.join();
     Ok(CargoOutcome {
         success: !interrupted && status.is_some_and(|s| s.success()),
         errors: messages.errors,
         executables: messages.executables,
-        stderr,
         interrupted,
     })
 }

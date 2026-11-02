@@ -202,6 +202,14 @@ fn dev_loop_rebuilds_restarts_and_cleans_up() {
     let rebuild = Duration::from_secs(120);
     dev.wait_log("[ns] started hello-server", 1, first_build);
     dev.wait_body("hello v1", Duration::from_secs(10));
+    // cargo's own progress streams while the startup check runs, so a cold
+    // workspace shows what it compiles instead of sitting on "checking".
+    let log = dev.log();
+    let check_ok = log.find("[ns] check ok").expect("no check ok");
+    assert!(
+        log[..check_ok].contains("Checking greeter"),
+        "cargo progress missing before the startup check finished:\n{log}"
+    );
 
     // (a) a library edit rebuilds and restarts with the new body.
     dev.edit("crates/greeter/src/lib.rs", "hello v1", "hello v2");
