@@ -204,6 +204,7 @@ struct Run<'a> {
     placeholders: Placeholders,
     tier1: String,
     cow_mode: crate::config::CowMode,
+    min_free_disk_pct: f64,
 }
 
 /// `<profile>/build/<unit>/out` → `<profile>`
@@ -341,6 +342,7 @@ impl<'a> Run<'a> {
             placeholders,
             tier1,
             cow_mode: settings.cow_mode,
+            min_free_disk_pct: settings.min_free_disk_pct,
         })
     }
 
@@ -480,10 +482,10 @@ impl<'a> Run<'a> {
         match self.store_run(stdout, stderr, run_ms) {
             Ok(key) => {
                 info!(%key, out_dir = %self.out_dir.display(), "build script stored");
-                crate::gc::auto::maybe_spawn(&self.store.root);
             }
             Err(e) => warn!(out_dir = %self.out_dir.display(), "build script not stored: {e:#}"),
         }
+        crate::gc::auto::maybe_spawn(&self.store.root, self.min_free_disk_pct);
         code
     }
 
@@ -514,6 +516,7 @@ impl<'a> Run<'a> {
             dirs: Vec::new(),
             compile_ms: run_ms,
         };
+        self.store.ensure_room(self.min_free_disk_pct)?;
         self.snapshot(&self.out_dir, &mut entry)?;
         let key = self.tier2(&inputs);
         entry.key = key.clone();

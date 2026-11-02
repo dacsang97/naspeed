@@ -72,6 +72,8 @@ impl Sandbox {
             .env("NASPEED_CONFIG_DIR", &self.config)
             .env("NASPEED_STORE", &self.store)
             .env("NASPEED_MIN_FREE_MEM_MB", "0")
+            // Stores here must not depend on how full the host volume is.
+            .env("NASPEED_MIN_FREE_DISK_PCT", "0")
             // Tests read usage.log directly; a background gc would fold it.
             .env("NASPEED_NO_AUTO_GC", "1")
             // No detached rustc outliving a test's target dir; the warm-up

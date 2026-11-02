@@ -292,10 +292,11 @@ impl Job<'_> {
                 if let Some(entry) = self.store.read_entry(&key) {
                     self.install_build_script_launcher(&entry);
                 }
-                crate::gc::auto::maybe_spawn(&self.store.root);
             }
             Err(e) => warn!(crate_name = ?inv.crate_name, "not stored: {e:#}"),
         }
+        // Also after a refused store: a full volume is when gc matters most.
+        crate::gc::auto::maybe_spawn(&self.store.root, self.settings.min_free_disk_pct);
         code
     }
 
@@ -425,6 +426,10 @@ impl Job<'_> {
                 }
             }
         }
+        if self.cacheable.source_kind == SourceKind::Local {
+            check_workspace_entry_size(&pending, self.settings.workspace_cache_max_entry_mb)?;
+        }
+        self.store.ensure_room(self.settings.min_free_disk_pct)?;
         let mut outputs = Vec::new();
         for (name, path, mode) in pending {
             let (object, size) = self.store.ingest_object(&path)?;
@@ -508,6 +513,32 @@ fn edited_during(t: SystemTime, started: SystemTime) -> bool {
     } else {
         t >= started
     }
+}
+
+/// Refuse a workspace crate whose outputs total more than `max_mb` MiB
+/// (0: no limit). Such a crate is usually a big binary or rlib rebuilt on
+/// every save: storing it pins about its size per save until gc, and the
+/// hash pass rereads all of it, for entries that almost never hit again.
+fn check_workspace_entry_size(
+    pending: &[(String, std::path::PathBuf, u32)],
+    max_mb: u64,
+) -> Result<()> {
+    if max_mb == 0 {
+        return Ok(());
+    }
+    let total: u64 = pending
+        .iter()
+        .filter_map(|(_, path, _)| std::fs::metadata(path).ok())
+        .map(|m| m.len())
+        .sum();
+    let limit = max_mb.saturating_mul(1024 * 1024);
+    if total > limit {
+        bail!(
+            "outputs are {} MiB, above workspace_cache_max_entry_mb = {max_mb}",
+            total / (1024 * 1024)
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -598,6 +629,18 @@ pub(crate) fn run_teed_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_entry_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("libbig-0123456789abcdef.rlib");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(3 * 1024 * 1024).unwrap();
+        let pending = vec![("libbig-0123456789abcdef.rlib".to_string(), path, 0o644)];
+        assert!(check_workspace_entry_size(&pending, 0).is_ok());
+        assert!(check_workspace_entry_size(&pending, 3).is_ok());
+        assert!(check_workspace_entry_size(&pending, 2).is_err());
+    }
 
     #[test]
     fn edits_before_the_compile_are_not_too_new() {

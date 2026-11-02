@@ -96,6 +96,21 @@ pub fn run(args: StatusArgs) -> Result<u8> {
         crate::ui_info!("store"; path = root.display());
         let _store = crate::ui::indent();
         let store = Store::open(root, settings.cow_mode)?;
+        if let Some((avail, total)) = crate::platform::disk_space(root) {
+            let pct = if total > 0 {
+                avail as f64 * 100.0 / total as f64
+            } else {
+                0.0
+            };
+            let free = format!("{} ({pct:.1}%)", human(avail));
+            let floor = format!("{}%", settings.min_free_disk_pct);
+            if store.low_on_disk(settings.min_free_disk_pct) {
+                crate::ui_warn!("volume nearly full: misses are not stored until gc or cleanup frees space";
+                    free = free, min_free_disk_pct = floor);
+            } else {
+                crate::ui_info!("volume"; free = free, min_free_disk_pct = floor);
+            }
+        }
         // Fold the usage log only when no gc/wrapper conflicts; otherwise
         // counts are still read from both index and log.
         if let Ok(Some(_lock)) = store.try_exclusive_lock()

@@ -51,8 +51,13 @@ pub fn is_writable_dir(dir: &Path) -> bool {
 }
 
 pub fn free_bytes(dir: &Path) -> Option<u64> {
+    disk_space(dir).map(|(avail, _)| avail)
+}
+
+/// (bytes available to this user, total bytes) of the volume holding `dir`.
+pub fn disk_space(dir: &Path) -> Option<(u64, u64)> {
     let st = rustix::fs::statvfs(dir).ok()?;
-    Some(st.f_bavail * st.f_frsize)
+    Some((st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize))
 }
 
 /// Lowest-but-one CPU priority for the current process (background work).

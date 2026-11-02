@@ -170,18 +170,18 @@ pub fn is_writable_dir(dir: &Path) -> bool {
 }
 
 pub fn free_bytes(dir: &Path) -> Option<u64> {
+    disk_space(dir).map(|(avail, _)| avail)
+}
+
+/// (bytes available to this user, total bytes) of the volume holding `dir`.
+pub fn disk_space(dir: &Path) -> Option<(u64, u64)> {
     let path = wide(dir);
     let mut avail = 0u64;
-    // SAFETY: NUL-terminated path; the two unused outputs may be null.
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(
-            path.as_ptr(),
-            &mut avail,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    (ok != 0).then_some(avail)
+    let mut total = 0u64;
+    // SAFETY: NUL-terminated path; the unused output may be null.
+    let ok =
+        unsafe { GetDiskFreeSpaceExW(path.as_ptr(), &mut avail, &mut total, std::ptr::null_mut()) };
+    (ok != 0).then_some((avail, total))
 }
 
 pub fn lower_priority() {
