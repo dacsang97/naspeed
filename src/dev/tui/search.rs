@@ -22,6 +22,15 @@ impl Query {
     pub(super) fn matches(&self, text: &str) -> bool {
         self.regex.is_match(text)
     }
+
+    /// Byte ranges of the non-empty hits in `text`.
+    pub(super) fn ranges(&self, text: &str) -> Vec<std::ops::Range<usize>> {
+        self.regex
+            .find_iter(text)
+            .map(|hit| hit.range())
+            .filter(|range| !range.is_empty())
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

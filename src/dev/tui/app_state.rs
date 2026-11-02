@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 use super::super::ansi_strip::strip_ansi;
 use super::super::log_bus::{AppState as ProcessState, DevEvent, LogLine, LogSource};
 use super::search::{LevelFilter, LogLevel, Query};
-use super::selection::{Selection, is_continuation};
 
 pub(super) const SOURCE_CAPACITY: usize = 10_000;
 
@@ -31,7 +30,6 @@ pub(super) enum ScrollPosition {
     Top,
     RowsFromTop(usize),
     RowsFromBottom(usize),
-    EnsureCursor,
 }
 
 pub(super) struct UiLine {
@@ -40,7 +38,6 @@ pub(super) struct UiLine {
     pub(super) raw: String,
     pub(super) plain: String,
     pub(super) level: LogLevel,
-    pub(super) group: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -62,22 +59,20 @@ pub(super) struct TuiState {
     pub(super) by_source: BTreeMap<LogSource, VecDeque<u64>>,
     pub(super) merged: BTreeSet<u64>,
     pub(super) lines: BTreeMap<u64, UiLine>,
-    pub(super) last_group: BTreeMap<LogSource, u64>,
     pub(super) statuses: BTreeMap<String, ProcessState>,
     pub(super) build_status: Option<BuildStatus>,
     pub(super) next_id: u64,
-    pub(super) cursor: Option<u64>,
-    pub(super) selection: Selection,
     pub(super) scroll: ScrollPosition,
     pub(super) autoscroll: bool,
     pub(super) query_text: String,
     pub(super) query: Option<Query>,
-    pub(super) search_draft: String,
-    pub(super) search_editing: bool,
     pub(super) search_error: Option<String>,
-    pub(super) filter_mode: bool,
     pub(super) level_filter: LevelFilter,
     toast: Option<Toast>,
+    /// Background of the composer, shaded from the terminal's own.
+    pub(super) surface: Option<ratatui::style::Color>,
+    /// The shortcut list replaces the footer hint (`?` on an empty filter).
+    pub(super) show_shortcuts: bool,
     pub(super) view_generation: u64,
     pub(super) shutdown: bool,
 }
@@ -95,22 +90,18 @@ impl TuiState {
             by_source: BTreeMap::new(),
             merged: BTreeSet::new(),
             lines: BTreeMap::new(),
-            last_group: BTreeMap::new(),
             statuses: BTreeMap::new(),
             build_status: None,
             next_id: 1,
-            cursor: None,
-            selection: Selection::default(),
             scroll: ScrollPosition::Bottom,
             autoscroll: true,
             query_text: String::new(),
             query: None,
-            search_draft: String::new(),
-            search_editing: false,
             search_error: None,
-            filter_mode: false,
             level_filter: LevelFilter::All,
             toast: None,
+            surface: None,
+            show_shortcuts: false,
             view_generation: 0,
             shutdown: false,
         }
@@ -153,12 +144,6 @@ impl TuiState {
         let plain = strip_ansi(&raw);
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
-        let group = if is_continuation(&plain) {
-            self.last_group.get(&source).copied().unwrap_or(id)
-        } else {
-            id
-        };
-        self.last_group.insert(source.clone(), group);
         let level = LogLevel::detect(&plain);
         self.lines.insert(
             id,
@@ -168,7 +153,6 @@ impl TuiState {
                 raw,
                 plain,
                 level,
-                group,
             },
         );
         self.merged.insert(id);
@@ -181,7 +165,6 @@ impl TuiState {
             self.merged.remove(&evicted);
         }
         if self.autoscroll {
-            self.cursor = Some(id);
             self.scroll = ScrollPosition::Bottom;
         }
     }
@@ -216,6 +199,18 @@ impl TuiState {
     #[cfg(test)]
     pub(super) fn source_count(&self, source: &LogSource) -> usize {
         self.by_source.get(source).map_or(0, VecDeque::len)
+    }
+
+    /// The `[source] ` tag shown before a line. Status lines already start
+    /// with their own coloured `[ns]`; with a single app its lines need no
+    /// tag either, every app line being that app's.
+    pub(super) fn line_prefix(&self, source: &LogSource) -> String {
+        let single_app = matches!(source, LogSource::App(_)) && self.bins.len() == 1;
+        if single_app || *source == LogSource::Ns {
+            String::new()
+        } else {
+            format!("[{}] ", Self::source_name(source))
+        }
     }
 
     pub(super) fn source_name(source: &LogSource) -> &str {

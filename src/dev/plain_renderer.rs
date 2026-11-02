@@ -6,8 +6,19 @@ use std::io::{IsTerminal, Write, stderr, stdout};
 use super::ansi_strip::strip_ansi;
 use super::log_bus::{DevEvent, LogLine, LogSource, Sink};
 
-#[derive(Default)]
-pub struct PlainRenderer;
+pub struct PlainRenderer {
+    /// Tag app lines with `[bin] `; with a single app every app line is
+    /// that app's, so the tag is left out.
+    tag_apps: bool,
+}
+
+impl PlainRenderer {
+    pub fn new(app_count: usize) -> Self {
+        Self {
+            tag_apps: app_count > 1,
+        }
+    }
+}
 
 impl Sink for PlainRenderer {
     fn write(&mut self, event: &DevEvent) {
@@ -15,7 +26,7 @@ impl Sink for PlainRenderer {
             return;
         };
         match &line.source {
-            LogSource::App(bin) => render_app(line, bin),
+            LogSource::App(bin) => render_app(line, self.tag_apps.then_some(bin.as_str())),
             LogSource::Ns | LogSource::Build | LogSource::Test => {
                 let mut out = stderr().lock();
                 let _ = writeln!(out, "{}", line.raw);
@@ -29,7 +40,7 @@ impl Sink for PlainRenderer {
     }
 }
 
-fn render_app(line: &LogLine, bin: &str) {
+fn render_app(line: &LogLine, tag: Option<&str>) {
     let mut out = stdout().lock();
     let terminal = out.is_terminal();
     let color = terminal && std::env::var_os("NO_COLOR").is_none();
@@ -38,7 +49,10 @@ fn render_app(line: &LogLine, bin: &str) {
     } else {
         Cow::Owned(strip_ansi(&line.raw))
     };
-    let _ = write!(out, "{}{}", app_prefix(bin, color), raw);
+    if let Some(bin) = tag {
+        let _ = write!(out, "{}", app_prefix(bin, color));
+    }
+    let _ = write!(out, "{raw}");
     let _ = writeln!(out);
 }
 
@@ -61,6 +75,12 @@ fn color_for(bin: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_lines_are_tagged_only_when_several_apps_run() {
+        assert!(!PlainRenderer::new(1).tag_apps);
+        assert!(PlainRenderer::new(2).tag_apps);
+    }
 
     #[test]
     fn app_prefix_is_plain_when_color_is_disabled() {

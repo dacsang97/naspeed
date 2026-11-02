@@ -65,19 +65,13 @@ impl TuiState {
         }
     }
 
+    /// The composer's query filters as it is typed: only matching lines show.
     pub(super) fn passes_filters(&self, line: &UiLine) -> bool {
         self.level_filter.accepts(line.level)
-            && (!self.filter_mode
-                || self
-                    .query
-                    .as_ref()
-                    .is_none_or(|query| query.matches(&line.plain)))
-    }
-
-    pub(super) fn line_matches_query(&self, line: &UiLine) -> bool {
-        self.query
-            .as_ref()
-            .is_some_and(|query| query.matches(&line.plain))
+            && self
+                .query
+                .as_ref()
+                .is_none_or(|query| query.matches(&line.plain))
     }
 
     pub(super) fn tabs(&self) -> &[Tab] {
@@ -90,8 +84,6 @@ impl TuiState {
         }
         self.active_tab = index;
         self.invalidate_view();
-        self.reset_selection();
-        self.cursor = self.visible_lines().last().map(|line| line.id);
         self.scroll = ScrollPosition::Bottom;
         self.autoscroll = true;
     }
@@ -124,19 +116,7 @@ impl TuiState {
         for ids in self.by_source.values_mut() {
             ids.retain(|id| lines.contains_key(id));
         }
-        match self.active_tab().clone() {
-            Tab::All => self.last_group.clear(),
-            Tab::App(bin) => {
-                self.last_group.remove(&LogSource::App(bin));
-            }
-            Tab::Build => {
-                self.last_group.remove(&LogSource::Build);
-                self.last_group.remove(&LogSource::Test);
-            }
-        }
         self.invalidate_view();
-        self.reset_selection();
-        self.cursor = None;
         self.scroll = ScrollPosition::Bottom;
         self.autoscroll = true;
     }

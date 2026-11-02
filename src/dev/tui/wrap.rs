@@ -1,17 +1,31 @@
+use std::ops::Range;
+
 use ansi_to_tui::IntoText as _;
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span, Text},
 };
+
+/// Columns a wrapped row is indented by: the tag's width, or a short
+/// hanging indent for untagged lines so a wrapped row never reads as a
+/// line of its own.
+const HANGING_INDENT: usize = 2;
+
+pub(super) fn indent_width(prefix: &str, width: u16) -> u16 {
+    let max = usize::from(width).saturating_sub(1);
+    let tag = Line::raw(clipped_prefix(prefix, max).as_str()).width();
+    let indent = if tag == 0 { HANGING_INDENT } else { tag };
+    indent.min(max) as u16
+}
 
 pub(super) fn height(plain: &str, prefix: &str, width: u16) -> u16 {
     if width == 0 {
         return 1;
     }
+    let indent_width = usize::from(indent_width(prefix, width));
     let width = usize::from(width);
     let prefix = clipped_prefix(prefix, width.saturating_sub(1));
-    let indent_width = Line::raw(prefix.as_str()).width();
-    let mut column = indent_width;
+    let mut column = Line::raw(prefix.as_str()).width();
     let mut rows = 1usize;
     for grapheme in Line::raw(plain).styled_graphemes(Style::default()) {
         let grapheme_width = Line::raw(grapheme.symbol).width();
@@ -24,39 +38,41 @@ pub(super) fn height(plain: &str, prefix: &str, width: u16) -> u16 {
     rows.min(usize::from(u16::MAX)) as u16
 }
 
+/// The line's rows at `width`, with the byte ranges of `plain` in
+/// `matches` (the filter's hits) highlighted.
 pub(super) fn styled_lines(
     raw: &str,
     plain: &str,
     prefix: &str,
     width: u16,
-    highlight: bool,
-    selected: bool,
+    matches: &[Range<usize>],
 ) -> Vec<Line<'static>> {
+    let indent = " ".repeat(usize::from(indent_width(prefix, width.max(1))));
     let width = usize::from(width.max(1));
     let prefix = clipped_prefix(prefix, width.saturating_sub(1));
-    let indent = " ".repeat(Line::raw(prefix.as_str()).width());
-    let background = if selected {
-        Style::default()
-            .bg(Color::Blue)
-            .add_modifier(Modifier::BOLD)
-    } else if highlight {
-        Style::default().bg(Color::DarkGray)
-    } else {
-        Style::default()
-    };
+    let background = Style::default();
     let prefix_style = Style::default().fg(Color::DarkGray).patch(background);
     let text = raw
         .into_text()
         .unwrap_or_else(|_| Text::raw(plain.to_string()));
     let mut rows = Vec::new();
     let mut builder = RowBuilder::new(prefix, indent, width, prefix_style, background);
+    let match_style = Style::default().fg(Color::Black).bg(Color::Yellow);
+    let mut offset = 0usize;
     for (line_index, line) in text.lines.iter().enumerate() {
         if line_index > 0 {
             builder.new_line();
         }
         for span in &line.spans {
             for grapheme in span.styled_graphemes(line.style) {
-                builder.push(grapheme.symbol, grapheme.style);
+                let hit = matches.iter().any(|range| range.contains(&offset));
+                offset += grapheme.symbol.len();
+                let style = if hit {
+                    grapheme.style.patch(match_style)
+                } else {
+                    grapheme.style
+                };
+                builder.push(grapheme.symbol, style);
             }
         }
     }

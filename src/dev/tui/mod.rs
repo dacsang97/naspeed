@@ -6,9 +6,9 @@ mod render;
 mod render_status;
 mod search;
 mod search_state;
-mod selection;
-mod selection_state;
+mod terminal_bg;
 mod terminal_guard;
+mod text_selection;
 pub(super) mod tui_sink;
 mod view;
 mod wrap;
@@ -68,6 +68,8 @@ fn run_event_loop(
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     let mut state = TuiState::new(bins);
+    state.surface = terminal_bg::query(terminal_bg::QUERY_TIMEOUT)
+        .map(|background| terminal_bg::surface(background, terminal_bg::truecolor()));
     let mut screen = ScreenMap::default();
     let mut dirty = true;
 
@@ -107,12 +109,12 @@ fn run_event_loop(
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     dirty = true;
-                    if handle_key(&mut state, key, &screen, commands) {
+                    if handle_key(&mut state, key, &mut screen, commands) {
                         break;
                     }
                 }
                 Event::Mouse(mouse) => {
-                    handle_mouse(&mut state, mouse, &screen);
+                    handle_mouse(&mut state, mouse, &mut screen);
                     dirty = true;
                 }
                 Event::Resize(_, _) => dirty = true,

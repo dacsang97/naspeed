@@ -67,14 +67,29 @@ filename, `app-` is prefixed repeatedly until that session's name is unique.
 
 An interactive stdin/stdout starts the TUI; `--no-tui` or redirected streams
 use plain output, with app lines prefixed by binary on stdout and status/build
-lines on stderr. The TUI has All, per-bin and build tabs (`1`–`9`, Tab and
-Shift-Tab), scroll/autoscroll (`Up`/`Down`, `a`), restart (`r`), clear the active
-view (`C`), quit (`q` or Ctrl-C), and search (`/`, smart-case literal or `re:`
-regex; `f` toggles filtering, `e` cycles severity, `n`/`N` moves between
-matches). Select a logical log-line range with `v` and Shift-`Up`/`Down`, or
-click a line; `c` copies the selection. Continuation rows are grouped only
-with the preceding line from the same source. Copy sends OSC 52 and also tries
-the platform clipboard command; the TUI reports which methods succeeded.
+lines on stderr. With a single app its lines carry no `[bin]` prefix, in plain
+output, the TUI and copied text alike.
+
+The TUI's header holds the tabs (All, one per bin, and build, which shows the
+compiler's and `--test` output and turns red when a build fails; click one, or
+use Tab and Shift-Tab) with each process's state and the last build on the
+right. Wrapped rows of untagged lines hang two columns in.
+The mouse wheel scrolls the logs; scrolling back to the bottom (or `End`,
+`Enter`) follows new lines again. Drag over the logs to select text as in a
+terminal; releasing the button copies it, wrapped rows rejoined into their
+line. While a selection is shown the log view holds still; the next key,
+click or scroll drops it. The composer at the bottom is the filter, on a
+surface shaded from the terminal's background (asked with OSC 11; terminals
+that do not answer get none): typing filters the logs as you go (smart-case
+literal, or a `re:` regex; an incomplete regex keeps the last valid filter),
+the hits are highlighted and counted on the right, Backspace edits it and
+`Esc` or Ctrl-U clears it.
+The footer only says `? for shortcuts`: `?` on an empty filter lists them
+(again, `Esc` or any key closes the list). Commands sit on control keys: Ctrl-E cycles the severity filter, Ctrl-R
+restarts the active tab's binary (every binary from All or build), Ctrl-L clears the active view
+and Ctrl-C or Ctrl-D quits; `Up`/`Down`, PgUp/PgDn and `Home` still scroll.
+Copy sends OSC 52 and also tries the platform clipboard command; the TUI
+reports which methods succeeded.
 Terminal modes are restored on exit, Ctrl-C, SIGTERM and panic unwinding.
 
 ## `ns.toml`

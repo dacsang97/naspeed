@@ -85,7 +85,7 @@ pub fn run(args: DevArgs) -> Result<u8> {
         let router = log_bus::route(rx, sinks);
         run_interactive(project, settings, bus.clone(), events, bins, router)?
     } else {
-        sinks.push(Box::new(PlainRenderer));
+        sinks.push(Box::new(PlainRenderer::new(bins.len())));
         let router = log_bus::route(rx, sinks);
         let result = catch_unwind(AssertUnwindSafe(|| {
             dev_loop::run_loop(project, settings, bus.clone(), None, false)
