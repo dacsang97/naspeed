@@ -2,6 +2,7 @@
 //! `ns image`. Every field has a default derived from `cargo metadata`, and
 //! unknown keys are errors (with line and column) rather than silently ignored.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -52,19 +53,46 @@ impl Default for TestConfig {
 #[derive(Debug, Default, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DevConfig {
-    /// Binary to run; default: the only binary of the workspace.
+    /// Legacy single binary; mutually exclusive with `bins`.
     pub bin: Option<String>,
+    /// Binaries to supervise; defaults to the only workspace binary.
+    pub bins: Vec<String>,
     pub args: Vec<String>,
-    /// Loaded into the child's environment; changes only restart the child.
+    /// Loaded into every app unless overridden in `[dev.apps.<bin>]`.
     pub env_file: Option<PathBuf>,
     /// Paths (relative to the workspace root) to watch; default: every member.
     pub watch: Vec<PathBuf>,
     /// Glob patterns ignored on top of `.gitignore`, `target*` and `.git`.
     pub ignore: Vec<String>,
-    /// Ports that must be free before the new process starts.
+    /// Ports that must be free before an app starts.
     pub ports: Vec<u16>,
+    /// Per-binary command and environment overrides.
+    pub apps: BTreeMap<String, AppConfig>,
+    /// `true` uses target/ns-dev, `false` disables logs, a path overrides it.
+    pub log_dir: LogDir,
     /// After each clean build, run tests of changed crates and their dependents.
     pub test: bool,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AppConfig {
+    pub args: Option<Vec<String>>,
+    pub env_file: Option<PathBuf>,
+    pub ports: Option<Vec<u16>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum LogDir {
+    Enabled(bool),
+    Path(PathBuf),
+}
+
+impl Default for LogDir {
+    fn default() -> Self {
+        Self::Enabled(true)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -388,6 +416,45 @@ entrypoint = ["/api"]
             .unwrap_err()
             .to_string();
         assert!(err.contains("deploy"), "{err}");
+    }
+
+    #[test]
+    fn parses_multi_bin_dev_settings_and_rejects_unknown_app_keys() {
+        let cfg = NsConfig::parse(
+            r#"
+[dev]
+bins = ["api", "worker"]
+log_dir = ".logs"
+
+[dev.apps.api]
+args = ["--port", "8080"]
+ports = [8080]
+
+[dev.apps.worker]
+env_file = "worker.env"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.dev.bins, ["api", "worker"]);
+        assert_eq!(
+            cfg.dev.apps["api"].args.as_deref(),
+            Some(&["--port".to_string(), "8080".to_string()][..])
+        );
+        assert_eq!(cfg.dev.apps["api"].ports.as_deref(), Some(&[8080][..]));
+        assert_eq!(
+            cfg.dev.apps["worker"].env_file.as_deref(),
+            Some(Path::new("worker.env"))
+        );
+        assert_eq!(cfg.dev.log_dir, LogDir::Path(PathBuf::from(".logs")));
+        assert!(
+            NsConfig::parse("[dev]\nlog_dir = false\n")
+                .unwrap()
+                .dev
+                .log_dir
+                == LogDir::Enabled(false)
+        );
+        assert!(NsConfig::parse("[dev.apps.api]\nunknown = true\n").is_err());
+        assert!(NsConfig::parse("[dev]\nbin = \"api\"\nbins = [\"api\"]\n").is_ok());
     }
 
     #[test]

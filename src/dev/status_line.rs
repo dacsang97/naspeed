@@ -1,46 +1,57 @@
-//! `[ns]`-prefixed status lines on stderr, kept visually apart from the app's
-//! own stdout/stderr (which the app writes directly to the terminal).
+//! `[ns]` status output is carried as events so plain, file and TUI sinks agree.
 
 use std::fmt::Display;
 use std::io::IsTerminal;
 use std::time::Duration;
 
+use super::log_bus::{LogBus, LogSource, Stream};
+
 fn prefix(color: &str) -> String {
-    if std::io::stderr().is_terminal() {
+    if std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
         format!("\x1b[1;{color}m[ns]\x1b[0m")
     } else {
         "[ns]".to_string()
     }
 }
 
-pub fn info(msg: impl Display) {
-    eprintln!("{} {msg}", prefix("36"));
+fn emit(bus: &LogBus, source: LogSource, color: &str, msg: impl Display) {
+    bus.log(source, Stream::Stderr, format!("{} {msg}", prefix(color)));
 }
 
-pub fn ok(msg: impl Display) {
-    eprintln!("{} {msg}", prefix("32"));
+pub fn info(bus: &LogBus, msg: impl Display) {
+    emit(bus, LogSource::Ns, "36", msg);
 }
 
-pub fn warn(msg: impl Display) {
-    eprintln!("{} {msg}", prefix("33"));
+pub fn ok(bus: &LogBus, msg: impl Display) {
+    emit(bus, LogSource::Ns, "32", msg);
 }
 
-pub fn error(msg: impl Display) {
-    eprintln!("{} {msg}", prefix("31"));
+pub fn warn(bus: &LogBus, msg: impl Display) {
+    emit(bus, LogSource::Ns, "33", msg);
 }
 
-/// Prints the first rendered compiler error and the total count. Rendered
-/// diagnostics already end with a newline and carry their own colors.
-pub fn compile_errors(step: &str, errors: &[String], elapsed: Duration) {
+pub fn error(bus: &LogBus, msg: impl Display) {
+    emit(bus, LogSource::Ns, "31", msg);
+}
+
+/// Prints the first rendered compiler error and the total count.
+pub fn compile_errors(bus: &LogBus, step: &str, errors: &[String], elapsed: Duration) {
     if let Some(first) = errors.first() {
-        eprintln!("{}", first.trim_end_matches('\n'));
+        bus.log(
+            LogSource::Build,
+            Stream::Stderr,
+            first.trim_end_matches('\n'),
+        );
     }
     let n = errors.len();
-    error(format!(
-        "{step} failed: {n} error{} in {} (previous process keeps running)",
-        if n == 1 { "" } else { "s" },
-        ms(elapsed)
-    ));
+    error(
+        bus,
+        format!(
+            "{step} failed: {n} error{} in {} (previous process keeps running)",
+            if n == 1 { "" } else { "s" },
+            ms(elapsed)
+        ),
+    );
 }
 
 /// Human-friendly duration: `850 ms` or `3.2 s`.

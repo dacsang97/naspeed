@@ -1,0 +1,9 @@
+[dev]
+bins = ["api", "worker"]
+
+[dev.apps.api]
+ports = [18081]
+env_file = "api.env"
+
+[dev.apps.worker]
+env_file = "worker.env"

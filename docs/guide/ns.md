@@ -11,7 +11,7 @@ out instead of compiling.
 
 | Command | What it does |
 |---|---|
-| `ns dev [--bin B] [--test] [-- args]` | Watches the workspace (respecting `.gitignore`, always skipping `target*` and `.git`), runs `cargo check` on each change, then builds and restarts the binary. A compile error keeps the old process serving. The old process group is stopped (SIGTERM, then SIGKILL after 5 s) and `dev.ports` are free before the new one starts. Changes during a build trigger one more cycle. A change to `.env` only restarts. `--test` runs `cargo test -p` for the changed crates and every workspace crate that depends on them. Ctrl-C cleans up the whole process group. |
+| `ns dev [--bin B]… [--all] [--no-tui] [--test] [-- args]` | Watches, checks and builds once per Rust change, then restarts only affected application process groups. Failed checks/builds leave the old processes serving; changes during Cargo are queued. Interactive terminals get the searchable log TUI; pipes and `--no-tui` get prefixed plain output. See [`ns dev`](#ns-dev). |
 | `ns fmt [--check] [cargo fmt args]` | `cargo fmt` over every package of the workspace; `--check` reports unformatted files instead of rewriting them. Packages whose `.rs` files are unchanged since they were last formatted cleanly are skipped (the record is in the store, keyed by rustfmt version and config, shared by all worktrees), so a repeat run takes a fraction of a second. `-p` narrows it (no cache), rustfmt flags go after `--`. |
 | `ns check [--fix] [--no-fmt] [clippy args]` | Format, lint and type check in one step: `cargo fmt --check`, then `cargo clippy --workspace --all-targets -- -D warnings`, both through the cache. Each step is reported and the command fails if either fails. `-p` or target flags narrow the clippy run, flags after `--` replace `-D warnings`, and `--fix` formats in place and applies clippy's automatic fixes. |
 | `ns test [--no-cache] [cargo test args] [-- test args]` | Runs `cargo test` with naspeed as the target runner; a test binary whose inputs did not change since it last passed replays that run's output (marked `(cached)` on stderr) instead of running. Failures are never cached, and every binary runs even after one fails (`--fail-fast` stops at the first, like plain cargo). It ends with what the run did: rustc hits and misses, test binaries replayed and run. `ns dev --test` goes through the same cache. See [Test result cache](./test-cache). |
@@ -24,6 +24,58 @@ out instead of compiling.
 
 Builds see `NS_VERSION`, `NS_TAG`, `NS_COMMIT` and `SOURCE_DATE_EPOCH`, so a
 binary can embed its version with `option_env!("NS_VERSION")`.
+
+## `ns dev`
+
+`--bin` is repeatable and overrides configured selections. `--all` selects
+every workspace binary and cannot be combined with `--bin`. If neither is
+provided, `[dev].bins` is used; legacy `[dev].bin` remains supported. Arguments
+after `--` replace configured arguments and require exactly one selected bin.
+
+```toml
+[dev]
+bins = ["api", "worker"]
+args = ["--verbose"]
+env_file = ".env"
+log_dir = true
+
+[dev.apps.api]
+args = ["serve", "--port", "8317"]
+env_file = ".env.api"
+ports = [8317]
+
+[dev.apps.worker]
+args = ["worker"]
+env_file = ".env.worker"
+```
+
+Global `args`, `env_file` and `ports` are defaults; `[dev.apps.<bin>]` overrides
+them per binary. Rust changes check and build the selected binaries once, then
+restart only apps whose package or dependency changed. Workspace-level manifest
+and lockfile changes affect every selected app. An app's own environment file
+restarts only that app; another watched non-Rust file restarts all selected
+apps. A failed check or build keeps existing processes alive, and Cargo is not
+interrupted for ordinary file changes. Files observed during the cycle run in
+the next cycle.
+
+`log_dir` defaults to `true`, writing `build.log` and one `<bin>.log` beneath
+`target/ns-dev`; a string selects another directory and `false` disables files.
+Each session truncates its files, strips ANSI controls, timestamps lines, and
+keeps one `.1` rotation after a log exceeds 50 MiB. `build.log` is reserved for
+the build pipeline; if an app name would collide with it or another assigned
+filename, `app-` is prefixed repeatedly until that session's name is unique.
+
+An interactive stdin/stdout starts the TUI; `--no-tui` or redirected streams
+use plain output, with app lines prefixed by binary on stdout and status/build
+lines on stderr. The TUI has All, per-bin and build tabs (`1`–`9`, Tab and
+Shift-Tab), scroll/autoscroll (`Up`/`Down`, `a`), restart (`r`), clear the active
+view (`C`), quit (`q` or Ctrl-C), and search (`/`, smart-case literal or `re:`
+regex; `f` toggles filtering, `e` cycles severity, `n`/`N` moves between
+matches). Select a logical log-line range with `v` and Shift-`Up`/`Down`, or
+click a line; `c` copies the selection. Continuation rows are grouped only
+with the preceding line from the same source. Copy sends OSC 52 and also tries
+the platform clipboard command; the TUI reports which methods succeeded.
+Terminal modes are restored on exit, Ctrl-C, SIGTERM and panic unwinding.
 
 ## `ns.toml`
 
