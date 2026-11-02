@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/dacsang97/naspeed/compare/v0.5.0...v0.6.0) - 2026-11-02
+
+### Added
+
+- *(dev)* add multi-bin supervision and TUI ([#22](https://github.com/dacsang97/naspeed/pull/22))
+
+### Other
+
+- install steps for Windows ([#20](https://github.com/dacsang97/naspeed/pull/20))
+
 ### Added
 
 - add multi-binary `ns dev` with selective restarts, captured and prefixed app output, per-app logs and a searchable TUI
