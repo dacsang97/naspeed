@@ -68,7 +68,9 @@ filename, `app-` is prefixed repeatedly until that session's name is unique.
 An interactive stdin/stdout starts the TUI; `--no-tui` or redirected streams
 use plain output, with app lines prefixed by binary on stdout and status/build
 lines on stderr. With a single app its lines carry no `[bin]` prefix, in plain
-output, the TUI and copied text alike.
+output, the TUI and copied text alike. cargo's own progress (`Checking`,
+`Compiling`, build-script warnings) streams as build lines while each check
+and build runs, so a cold workspace shows what it is compiling.
 
 The TUI's header holds the tabs (All, one per bin, and build, which shows the
 compiler's and `--test` output and turns red when a build fails; click one, or
