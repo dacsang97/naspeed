@@ -73,6 +73,8 @@ impl DevSession {
             .env("NASPEED_STORE", store)
             .env("NASPEED_CONFIG_DIR", store.join("config"))
             .env("NASPEED_MIN_FREE_MEM_MB", "0")
+            // Stores here must not depend on how full the host volume is.
+            .env("NASPEED_MIN_FREE_DISK_PCT", "0")
             .env("NASPEED_NO_AUTO_GC", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

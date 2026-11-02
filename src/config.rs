@@ -9,6 +9,13 @@ use toml_edit::{DocumentMut, value};
 pub const DEFAULT_MIN_FREE_MEM_MB: u64 = 1536;
 pub const DEFAULT_STORE_CAP_GB: f64 = 20.0;
 pub const DEFAULT_STORE_MAX_AGE_DAYS: f64 = 14.0;
+/// Below this share of free space on a store's volume, misses are not stored.
+/// A nearly full SSD fragments every write and stalls its controller; on
+/// USB enclosures those stalls end in a reset (the drive disconnects).
+pub const DEFAULT_MIN_FREE_DISK_PCT: f64 = 10.0;
+/// Workspace crates whose outputs exceed this are not stored: a big crate
+/// rebuilt on every save pins a fresh copy per save and almost never hits.
+pub const DEFAULT_WORKSPACE_CACHE_MAX_ENTRY_MB: u64 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CowMode {
@@ -35,6 +42,12 @@ pub struct Settings {
     pub build_script_cache: bool,
     /// gc evicts store entries unused for longer than this.
     pub store_max_age_days: f64,
+    /// Misses are not stored while the store's volume has less free space
+    /// than this percentage; gc runs early instead. 0 disables the guard.
+    pub min_free_disk_pct: f64,
+    /// Workspace (local) crates whose outputs total more than this many MiB
+    /// are compiled but not stored. 0 removes the limit.
+    pub workspace_cache_max_entry_mb: u64,
     /// Cache workspace members and path dependencies (keyed per source file).
     pub workspace_cache: bool,
     /// Peer stores (`naspeed cache serve`, e.g. over Tailscale) asked on a
@@ -155,6 +168,14 @@ impl Settings {
                 .get("store_max_age_days")
                 .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
                 .unwrap_or(DEFAULT_STORE_MAX_AGE_DAYS),
+            min_free_disk_pct: doc
+                .get("min_free_disk_pct")
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .map(|p| p.clamp(0.0, 100.0))
+                .unwrap_or(DEFAULT_MIN_FREE_DISK_PCT),
+            workspace_cache_max_entry_mb: int("workspace_cache_max_entry_mb")
+                .map(|n| n.max(0) as u64)
+                .unwrap_or(DEFAULT_WORKSPACE_CACHE_MAX_ENTRY_MB),
             workspace_cache: doc
                 .get("workspace_cache")
                 .and_then(|v| v.as_bool())
@@ -184,6 +205,19 @@ impl Settings {
             .and_then(|v| v.parse::<u64>().ok())
         {
             self.min_free_mem_mb = n;
+        }
+        if let Some(p) = std::env::var("NASPEED_MIN_FREE_DISK_PCT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|p| p.is_finite())
+        {
+            self.min_free_disk_pct = p.clamp(0.0, 100.0);
+        }
+        if let Some(n) = std::env::var("NASPEED_WORKSPACE_CACHE_MAX_ENTRY_MB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            self.workspace_cache_max_entry_mb = n;
         }
         match std::env::var("NASPEED_COW_MODE").as_deref() {
             Ok("copy") => self.cow_mode = CowMode::Copy,
@@ -262,6 +296,8 @@ slots = 6
 min_free_mem_mb = 1024
 store_cap_gb = 12.5
 cow_mode = "copy"
+min_free_disk_pct = 15
+workspace_cache_max_entry_mb = 64
 remotes = ["http://buildbox:7878"]
 "#
         .parse()
@@ -272,6 +308,8 @@ remotes = ["http://buildbox:7878"]
         assert_eq!(s.min_free_mem_mb, 1024);
         assert_eq!(s.store_cap_gb, 12.5);
         assert_eq!(s.cow_mode, CowMode::Copy);
+        assert_eq!(s.min_free_disk_pct, 15.0);
+        assert_eq!(s.workspace_cache_max_entry_mb, 64);
         assert_eq!(s.remotes, vec!["http://buildbox:7878".to_string()]);
         assert_eq!(s.remote_token_file, PathBuf::from("/tmp/x/remote.token"));
     }
@@ -283,5 +321,10 @@ remotes = ["http://buildbox:7878"]
         assert_eq!(s.slots, default_slots());
         assert_eq!(s.store_cap_gb, DEFAULT_STORE_CAP_GB);
         assert_eq!(s.cow_mode, CowMode::Auto);
+        assert_eq!(s.min_free_disk_pct, DEFAULT_MIN_FREE_DISK_PCT);
+        assert_eq!(
+            s.workspace_cache_max_entry_mb,
+            DEFAULT_WORKSPACE_CACHE_MAX_ENTRY_MB
+        );
     }
 }

@@ -79,5 +79,6 @@ mod tests {
         assert_eq!(device_of(dir.path()), device_of(&sub));
         assert!(is_writable_dir(dir.path()));
         assert!(free_bytes(dir.path()).is_some_and(|b| b > 0));
+        assert!(disk_space(dir.path()).is_some_and(|(avail, total)| avail > 0 && total >= avail));
     }
 }

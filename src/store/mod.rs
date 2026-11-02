@@ -292,8 +292,35 @@ impl Store {
             .join(format!("{prefix}.{}.{}", std::process::id(), now_nanos()))
     }
 
+    /// True when the store's volume has less than `min_pct` percent free.
+    /// Unknown free space (the call failed) counts as enough room.
+    pub fn low_on_disk(&self, min_pct: f64) -> bool {
+        disk_below(&self.root, min_pct)
+    }
+
+    /// Refuse to ingest while the volume is nearly full. Cloned objects cost
+    /// nothing now but keep their blocks once rustc replaces the target/
+    /// copy, so storing on a full volume is what fills it the rest of the way.
+    pub fn ensure_room(&self, min_pct: f64) -> Result<()> {
+        if self.low_on_disk(min_pct) {
+            anyhow::bail!("less than {min_pct}% free on the store's volume (min_free_disk_pct)");
+        }
+        Ok(())
+    }
+
     pub fn append_usage(&self, record: &usage_log::Record) {
         usage_log::append(&self.root, record);
+    }
+}
+
+/// Whether the volume holding `dir` has less than `min_pct` percent free.
+pub fn disk_below(dir: &Path, min_pct: f64) -> bool {
+    if min_pct <= 0.0 {
+        return false;
+    }
+    match crate::platform::disk_space(dir) {
+        Some((avail, total)) if total > 0 => (avail as f64) < (total as f64) * min_pct / 100.0,
+        _ => false,
     }
 }
 
@@ -317,6 +344,17 @@ fn place_object(tmp: &Path, dst: &Path, size: u64) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn room_guard_follows_the_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), CowMode::Auto).unwrap();
+        // 0 turns the guard off; demanding more than 100% free always trips it.
+        assert!(!store.low_on_disk(0.0));
+        assert!(store.ensure_room(0.0).is_ok());
+        assert!(store.low_on_disk(100.1));
+        assert!(store.ensure_room(100.1).is_err());
+    }
 
     #[test]
     fn placing_over_an_existing_read_only_object_succeeds() {
