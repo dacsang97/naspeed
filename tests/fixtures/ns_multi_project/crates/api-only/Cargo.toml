@@ -1,0 +1,7 @@
+[package]
+name = "api-only"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+shared = { path = "../shared" }

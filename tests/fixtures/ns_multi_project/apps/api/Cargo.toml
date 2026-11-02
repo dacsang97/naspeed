@@ -1,0 +1,8 @@
+[package]
+name = "api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+api-only = { path = "../../crates/api-only" }
+shared = { path = "../../crates/shared" }

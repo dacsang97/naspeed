@@ -35,6 +35,16 @@ pub fn shutdown_requested() -> bool {
     SHUTDOWN.load(Ordering::SeqCst)
 }
 
+/// Requests the same orderly shutdown used by the installed signal handler.
+pub fn request_shutdown() {
+    SHUTDOWN.store(true, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(super) fn set_shutdown_for_test(requested: bool) {
+    SHUTDOWN.store(requested, Ordering::SeqCst);
+}
+
 /// A port is free when nothing accepts connections on it and it can be bound
 /// on all interfaces (std sets `SO_REUSEADDR`, like the apps we restart, so
 /// TIME_WAIT leftovers do not count as busy).

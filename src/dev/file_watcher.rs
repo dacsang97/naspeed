@@ -4,6 +4,7 @@
 //! an event storm (formatter, checkout, `touch` of many files) becomes one
 //! batch.
 
+use super::log_bus::LogBus;
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
@@ -83,13 +84,14 @@ impl WatchFilter {
         if rel.as_os_str().is_empty() || rel.components().any(|c| always_skipped(&c)) {
             return None;
         }
-        let listed =
-            self.files.iter().any(|f| f == rel) || self.dirs.iter().any(|d| rel.starts_with(d));
+        let explicitly_listed = self.files.iter().any(|file| file == rel);
+        let listed = explicitly_listed || self.dirs.iter().any(|dir| rel.starts_with(dir));
         if !listed
-            || self
-                .ignore
-                .matched_path_or_any_parents(rel, path.is_dir())
-                .is_ignore()
+            || (!explicitly_listed
+                && self
+                    .ignore
+                    .matched_path_or_any_parents(rel, path.is_dir())
+                    .is_ignore())
         {
             return None;
         }
@@ -103,42 +105,68 @@ pub struct FileWatcher {
     rx: Receiver<notify::Result<notify::Event>>,
     filter: WatchFilter,
     root: PathBuf,
+    bus: LogBus,
 }
 
 impl FileWatcher {
     /// Watches `dirs` recursively and the root itself non-recursively (for
     /// the root-level files the filter lists).
-    pub fn start(root: &Path, dirs: &[PathBuf], filter: WatchFilter) -> Result<FileWatcher> {
+    pub fn start(
+        root: &Path,
+        dirs: &[PathBuf],
+        filter: WatchFilter,
+        bus: LogBus,
+    ) -> Result<FileWatcher> {
         let (tx, rx) = channel();
         let mut watcher = notify::recommended_watcher(move |ev| {
             let _ = tx.send(ev);
         })
         .context("create file watcher")?;
         let mut root_recursive = false;
+        let mut watched_paths = BTreeSet::new();
         for dir in dirs {
             let abs = root.join(dir);
             if !abs.is_dir() {
-                super::status_line::warn(format!(
-                    "watch path {} does not exist; skipped",
-                    abs.display()
-                ));
+                super::status_line::warn(
+                    &bus,
+                    format!("watch path {} does not exist; skipped", abs.display()),
+                );
                 continue;
             }
             root_recursive |= abs == root || dir.as_os_str().is_empty() || dir == Path::new(".");
             watcher
                 .watch(&abs, RecursiveMode::Recursive)
                 .with_context(|| format!("watch {}", abs.display()))?;
+            watched_paths.insert(abs);
         }
         if !root_recursive {
             watcher
                 .watch(root, RecursiveMode::NonRecursive)
                 .with_context(|| format!("watch {}", root.display()))?;
+            watched_paths.insert(root.to_path_buf());
+        }
+        if !root_recursive {
+            for file in &filter.files {
+                if dirs.iter().any(|dir| file.starts_with(dir)) {
+                    continue;
+                }
+                let parent = file.parent().unwrap_or(Path::new(""));
+                let abs_parent = root.join(parent);
+                if watched_paths.contains(&abs_parent) || !abs_parent.is_dir() {
+                    continue;
+                }
+                watcher
+                    .watch(&abs_parent, RecursiveMode::NonRecursive)
+                    .with_context(|| format!("watch {}", abs_parent.display()))?;
+                watched_paths.insert(abs_parent);
+            }
         }
         Ok(FileWatcher {
             _watcher: watcher,
             rx,
             filter,
             root: root.to_path_buf(),
+            bus,
         })
     }
 
@@ -148,7 +176,7 @@ impl FileWatcher {
         let event = match msg {
             Ok(event) => event,
             Err(err) => {
-                super::status_line::warn(format!("file watcher: {err}"));
+                super::status_line::warn(&self.bus, format!("file watcher: {err}"));
                 return false;
             }
         };
@@ -260,6 +288,34 @@ mod tests {
     }
 
     #[test]
+    fn explicitly_watched_files_override_ignore_rules_but_not_always_skipped_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join(".gitignore"), "config/\n").unwrap();
+        let filter = WatchFilter::new(
+            root,
+            &[],
+            &[
+                PathBuf::from("config/api.env"),
+                PathBuf::from("target/api.env"),
+                PathBuf::from(".git/api.env"),
+                PathBuf::from("node_modules/api.env"),
+            ],
+            &["config/api.env".to_string()],
+        )
+        .unwrap();
+
+        assert!(filter.relevant(&root.join("config/api.env")).is_some());
+        assert!(filter.relevant(&root.join("target/api.env")).is_none());
+        assert!(filter.relevant(&root.join(".git/api.env")).is_none());
+        assert!(
+            filter
+                .relevant(&root.join("node_modules/api.env"))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn root_inside_a_target_dir_still_works() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("target/tmp/ws");
@@ -274,7 +330,8 @@ mod tests {
         let root = tmp.path().canonicalize().unwrap();
         std::fs::create_dir_all(root.join("crates/a")).unwrap();
         let f = filter(&root);
-        let w = FileWatcher::start(&root, &[PathBuf::from("crates")], f).unwrap();
+        let (bus, _rx) = LogBus::channel();
+        let w = FileWatcher::start(&root, &[PathBuf::from("crates")], f, bus).unwrap();
         std::thread::sleep(Duration::from_millis(300));
         for i in 0..50 {
             std::fs::write(root.join(format!("crates/a/f{i}.rs")), "x").unwrap();
@@ -282,5 +339,29 @@ mod tests {
         let batch = w.next_batch(Duration::from_secs(5)).unwrap();
         assert!(batch.len() >= 40, "got {} paths", batch.len());
         assert!(w.next_batch(Duration::from_millis(500)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn watches_nested_whitelisted_files_outside_recursive_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("crates/api")).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        let env_file = root.join("config/api.env");
+        std::fs::write(&env_file, "PORT=1\n").unwrap();
+        let filter = WatchFilter::new(
+            &root,
+            &[PathBuf::from("crates")],
+            &[PathBuf::from("Cargo.toml"), PathBuf::from("config/api.env")],
+            &[],
+        )
+        .unwrap();
+        let (bus, _rx) = LogBus::channel();
+        let watcher = FileWatcher::start(&root, &[PathBuf::from("crates")], filter, bus).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+
+        std::fs::write(&env_file, "PORT=2\n").unwrap();
+        let changes = watcher.next_batch(Duration::from_secs(3)).unwrap();
+        assert_eq!(changes, [env_file].into_iter().collect());
     }
 }

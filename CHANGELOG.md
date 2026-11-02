@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- add multi-binary `ns dev` with selective restarts, captured and prefixed app output, per-app logs and a searchable TUI
+
 ## [0.5.0](https://github.com/dacsang97/naspeed/compare/v0.4.0...v0.5.0) - 2026-11-01
 
 ### Added

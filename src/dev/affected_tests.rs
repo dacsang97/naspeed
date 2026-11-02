@@ -85,6 +85,7 @@ pub struct TestRun {
     readers: Vec<JoinHandle<()>>,
     started: Instant,
     scope: Scope,
+    bus: super::log_bus::LogBus,
     /// Changes this run covers; handed back when it is cancelled.
     pub paths: BTreeSet<PathBuf>,
     /// Test-cache plan the runner reads; removed when the run is dropped.
@@ -97,7 +98,12 @@ pub enum TestResult {
 }
 
 impl TestRun {
-    pub fn start(root: &Path, scope: Scope, paths: BTreeSet<PathBuf>) -> Result<TestRun> {
+    pub fn start(
+        root: &Path,
+        scope: Scope,
+        paths: BTreeSet<PathBuf>,
+        bus: super::log_bus::LogBus,
+    ) -> Result<TestRun> {
         // Through the test cache (unchanged packages replay their last
         // pass) unless the workspace cannot be loaded or opts out.
         let (mut cmd, plan) = match crate::project::Project::load(root)
@@ -130,13 +136,14 @@ impl TestRun {
             .context("cargo test stderr")?;
         readers.push(collect(stdout, output.clone()));
         readers.push(collect(stderr, output.clone()));
-        status_line::info(format!("testing {}", scope.describe()));
+        status_line::info(&bus, format!("testing {}", scope.describe()));
         Ok(TestRun {
             child,
             output,
             readers,
             started: Instant::now(),
             scope,
+            bus,
             paths,
             _plan: plan,
         })
@@ -153,27 +160,31 @@ impl TestRun {
         }
         let elapsed = status_line::ms(self.started.elapsed());
         if status.success() {
-            status_line::ok(format!(
-                "tests passed ({}) in {elapsed}",
-                self.scope.describe()
-            ));
+            status_line::ok(
+                &self.bus,
+                format!("tests passed ({}) in {elapsed}", self.scope.describe()),
+            );
             return Ok(Some(TestResult::Passed));
         }
         let output = self.output.lock().map(|o| o.clone()).unwrap_or_default();
         let lines: Vec<&str> = output.lines().collect();
         let tail = &lines[lines.len().saturating_sub(40)..];
-        eprintln!("{}", tail.join("\n"));
-        status_line::error(format!(
-            "tests failed ({}) in {elapsed}",
-            self.scope.describe()
-        ));
+        self.bus.log(
+            super::log_bus::LogSource::Test,
+            super::log_bus::Stream::Stderr,
+            tail.join("\n"),
+        );
+        status_line::error(
+            &self.bus,
+            format!("tests failed ({}) in {elapsed}", self.scope.describe()),
+        );
         Ok(Some(TestResult::Failed))
     }
 
     /// Kills the whole test group; returns the changes it did not get to cover.
     pub fn cancel(mut self) -> BTreeSet<PathBuf> {
         self.child.stop(STOP_GRACE);
-        status_line::info("tests cancelled by a newer change");
+        status_line::info(&self.bus, "tests cancelled by a newer change");
         std::mem::take(&mut self.paths)
     }
 }

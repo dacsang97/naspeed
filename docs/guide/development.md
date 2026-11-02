@@ -12,6 +12,33 @@ Integration tests live in `tests/` (setup/uninstall, materialize, gc, peer
 cache, test cache, release snapshot, local OCI registry, and others), with
 shared helpers in `tests/common` and fixture crates in `tests/fixtures`.
 
+## Try the development build locally
+
+Install the debug build into `~/.local/bin` without replacing a Homebrew
+installation:
+
+```sh
+make dev-install
+hash -r
+make dev-status
+```
+
+Both `naspeed` and its `ns` alias are installed. If `~/.local/bin` precedes
+Homebrew in `PATH`, the development build is selected while the Homebrew files
+remain untouched. Remove only the development copy and return to Homebrew with:
+
+```sh
+make dev-uninstall
+hash -r
+make dev-status
+```
+
+Set `DEV_BINDIR=/another/bin` on either install or uninstall to use a different
+local directory. The Makefile records ownership in that directory and refuses
+to replace or remove an existing `naspeed`/`ns` pair it does not own. After
+checking a pre-existing pair, `DEV_FORCE=1 make dev-install` explicitly replaces
+it and records this checkout as the owner.
+
 ## Linux
 
 ```sh
