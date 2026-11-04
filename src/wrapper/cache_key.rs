@@ -15,6 +15,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use super::Env;
+use super::build_script_run::rerun_inputs;
 use super::cacheability::{Cacheable, SourceKind};
 use super::extern_identity;
 use super::rustc_args::RustcInvocation;
@@ -75,6 +76,11 @@ pub trait Contents {
     fn extern_identity(&self, path: &Path) -> Result<String>;
     fn dir(&self, path: &Path) -> Result<String>;
     fn file(&self, path: &Path) -> Result<String>;
+    /// What the crate's build script printed when cargo last ran it.
+    fn build_script_stdout(&self, out_dir: &Path) -> Result<String>;
+    /// Content of a path a build script declared; directories leave out the
+    /// `skip` names. A path that does not exist is a value, not an error.
+    fn declared_path(&self, path: &Path, skip: &[&str]) -> Result<String>;
 }
 
 pub struct FsContents<'a> {
@@ -155,6 +161,29 @@ impl Contents for FsContents<'_> {
 
     fn file(&self, path: &Path) -> Result<String> {
         Ok(hash_file(path)
+            .with_context(|| format!("hash {}", path.display()))?
+            .to_hex()
+            .to_string())
+    }
+
+    fn build_script_stdout(&self, out_dir: &Path) -> Result<String> {
+        // Cargo keeps the script's stdout next to its OUT_DIR.
+        let output = out_dir.parent().unwrap_or(out_dir).join("output");
+        std::fs::read_to_string(&output).with_context(|| format!("read {}", output.display()))
+    }
+
+    fn declared_path(&self, path: &Path, skip: &[&str]) -> Result<String> {
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("\0missing".into()),
+            Err(e) => return Err(e).with_context(|| format!("stat {}", path.display())),
+        };
+        let hash = if meta.is_dir() {
+            hash_dir(path, skip)
+        } else {
+            hash_file(path)
+        };
+        Ok(hash
             .with_context(|| format!("hash {}", path.display()))?
             .to_hex()
             .to_string())
@@ -268,6 +297,11 @@ pub fn tier1(ctx: &KeyContext, contents: &dyn Contents) -> Result<String> {
             native_dirs.push(path);
         }
     }
+    if ctx.cacheable.source_kind == SourceKind::Local
+        && let Some(out_dir) = ctx.env.get("OUT_DIR").map(|d| ctx.cwd.join(d))
+    {
+        hash_declared_inputs(&mut h, ctx, contents, &out_dir)?;
+    }
     native_dirs.sort();
     for dir in &native_dirs {
         h.field(
@@ -304,6 +338,71 @@ pub fn tier1(ctx: &KeyContext, contents: &dyn Contents) -> Result<String> {
     }
 
     Ok(h.0.finalize().to_hex().to_string())
+}
+
+/// Hash what a local crate's build script declared with `rerun-if-*`.
+///
+/// A proc-macro can read inputs rustc does not list in dep-info, such as
+/// `sqlx::migrate!` reading `migrations/`. The build script is how a crate
+/// tells cargo about them, so cargo recompiles when they change, and the key
+/// has to change as well or that recompile hits the old artifact. A crate
+/// declaring nothing keeps its previous key, so `KEY_VERSION` stays put and
+/// the rest of the store remains valid; a crate declaring something gets a
+/// new key from these fields.
+fn hash_declared_inputs(
+    h: &mut KeyHasher,
+    ctx: &KeyContext,
+    contents: &dyn Contents,
+    out_dir: &Path,
+) -> Result<()> {
+    let ph = ctx.placeholders;
+    let manifest_dir = ctx
+        .env
+        .get("CARGO_MANIFEST_DIR")
+        .map(|d| ctx.cwd.join(d))
+        .context("CARGO_MANIFEST_DIR is not set")?;
+    for input in rerun_inputs(&contents.build_script_stdout(out_dir)?) {
+        if let Some(name) = input.strip_prefix("env:") {
+            // Windows `Env` keys are upper-cased; see `tier2`.
+            let lookup = if cfg!(windows) {
+                name.to_uppercase()
+            } else {
+                name.to_owned()
+            };
+            match ctx.env.get(lookup.as_str()) {
+                Some(value) => h.field(&format!("declared-env:{name}"), &ph.encode(value)),
+                None => h.field(&format!("declared-env-unset:{name}"), ""),
+            }
+        } else if let Some(declared) = input.strip_prefix("file:") {
+            let path = manifest_dir.join(declared);
+            // Under the profile dir: rewritten by every build, and OUT_DIR is
+            // hashed as a whole in `tier1`.
+            if path.starts_with(&ctx.cacheable.profile_dir) {
+                continue;
+            }
+            let target = target_dir_name(&path, &ctx.cacheable.profile_dir);
+            let mut skip = vec![".git", "target"];
+            skip.extend(target.as_deref());
+            h.field(
+                &format!("declared-file:{}", ph.encode(declared)),
+                &contents.declared_path(&path, &skip)?,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Name of the entry under `declared` that holds the profile dir, for a build
+/// script declaring a parent of a custom target dir (`rerun-if-changed=.`).
+fn target_dir_name(declared: &Path, profile_dir: &Path) -> Option<String> {
+    profile_dir
+        .strip_prefix(declared)
+        .ok()?
+        .components()
+        .next()?
+        .as_os_str()
+        .to_str()
+        .map(str::to_owned)
 }
 
 /// Prefix of manifest entries that are source files (local crates).
@@ -427,6 +526,25 @@ mod tests {
         fn file(&self, path: &Path) -> Result<String> {
             Ok(format!("file:{}", path.display()))
         }
+        fn build_script_stdout(&self, _: &Path) -> Result<String> {
+            Ok(String::new())
+        }
+        fn declared_path(&self, path: &Path, _: &[&str]) -> Result<String> {
+            Ok(format!("declared:{}", path.display()))
+        }
+    }
+
+    #[test]
+    fn target_dir_is_found_under_a_declared_parent() {
+        let profile = Path::new("/ws/storage/out-dir/debug");
+        assert_eq!(
+            target_dir_name(Path::new("/ws/storage"), profile).as_deref(),
+            Some("out-dir")
+        );
+        assert_eq!(
+            target_dir_name(Path::new("/ws/storage/migrations"), profile),
+            None
+        );
     }
 
     fn toolchain(name: &str) -> Toolchain {

@@ -73,6 +73,13 @@ To let other checkouts share these artifacts, naspeed adds
 - a proc-macro that reads files rustc does not list (for example sqlx offline
   data) is not tracked, just as cargo itself does not rebuild for them.
 
+To track such files, declare them in the crate's build script
+(`cargo:rerun-if-changed=migrations`, `cargo:rerun-if-env-changed=NAME`). The
+key of a workspace crate includes the current content of everything its build
+script declared, so cargo recompiles and naspeed misses. A directory is hashed
+without `.git` and the target dir. Generated files under the profile dir are
+covered by the `OUT_DIR` hash.
+
 ### Incremental warm-up
 
 A restored crate has no `-C incremental` session, so without help the first
