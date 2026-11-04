@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/dacsang97/naspeed/compare/v0.7.0...v0.8.0) - 2026-11-04
+
+### Fixed
+
+- *(wrapper)* key workspace crates on declared build script inputs ([#26](https://github.com/dacsang97/naspeed/pull/26))
+
 ## [0.7.0](https://github.com/dacsang97/naspeed/compare/v0.6.0...v0.7.0) - 2026-11-02
 
 ### Fixed
