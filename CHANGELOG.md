@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/dacsang97/naspeed/compare/v0.6.0...v0.7.0) - 2026-11-02
+
+### Fixed
+
+- *(dev)* stream cargo progress while checking and building ([#25](https://github.com/dacsang97/naspeed/pull/25))
+- *(store)* stop filling the store's volume on repeated workspace rebuilds ([#23](https://github.com/dacsang97/naspeed/pull/23))
+
 ## [0.6.0](https://github.com/dacsang97/naspeed/compare/v0.5.0...v0.6.0) - 2026-11-02
 
 ### Added
