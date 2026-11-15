@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/dacsang97/naspeed/compare/v0.8.0...v0.9.0) - 2026-11-15
+
+### Added
+
+- support cargo 1.100's build-dir layout ([#30](https://github.com/dacsang97/naspeed/pull/30))
+- *(dev)* sweep the project's target dir while ns dev runs ([#28](https://github.com/dacsang97/naspeed/pull/28))
+
 ## [0.8.0](https://github.com/dacsang97/naspeed/compare/v0.7.0...v0.8.0) - 2026-11-04
 
 ### Fixed
