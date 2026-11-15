@@ -61,16 +61,40 @@ fn dedup_shares_identical_build_output_without_rebuild() {
     fresh(&sb, "w2", &[]);
 }
 
+/// Backdates every unit in `profile` as if last built and used a month ago.
+fn backdate_units(profile: &Path) {
+    let month_ago = filetime::FileTime::from_system_time(
+        std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86_400),
+    );
+    for unit in std::fs::read_dir(profile.join(".fingerprint"))
+        .unwrap()
+        .flatten()
+    {
+        for file in std::fs::read_dir(unit.path()).unwrap().flatten() {
+            filetime::set_file_mtime(file.path(), month_ago).unwrap();
+        }
+        filetime::set_file_mtime(unit.path(), month_ago).unwrap();
+    }
+}
+
 #[test]
-fn targets_sweep_removes_old_feature_variant_only() {
+fn targets_sweep_keeps_feature_variants_until_unused_for_max_age() {
     let sb = Sandbox::new("sweep");
     sb.run("t", &["build"]);
-    sb.run("t", &["build", "--features", "greeting/loud"]);
     let profile = sb.root.join("t/debug");
+    // The default-feature build was last used a month ago.
+    backdate_units(&profile);
+    sb.run("t", &["build", "--features", "greeting/loud"]);
     // Features change the lib, build-script compile and run units: 2 × 3.
     assert_eq!(units(&profile, "greeting"), 6);
-    let out = sb.naspeed(&["gc", "--targets"]);
+
+    // Alternating feature sets are both in use: nothing goes within max age.
+    let out = sb.naspeed(&["gc", "--targets", "--max-age-days", "60"]);
     assert!(out.contains("swept target dirs"), "{out}");
+    assert_eq!(units(&profile, "greeting"), 6, "{out}");
+
+    // Past max age the unused variant goes; the one in use stays fresh.
+    let out = sb.naspeed(&["gc", "--targets", "--max-age-days", "14"]);
     assert_eq!(units(&profile, "greeting"), 3, "{out}");
     fresh(&sb, "t", &["--features", "greeting/loud"]);
 }

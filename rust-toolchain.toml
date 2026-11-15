@@ -1,2 +1,7 @@
 [toolchain]
-channel = "stable"
+# Cargo 1.100 always builds into the new build-dir layout
+# (`<profile>/build/<pkg>/<hash>/`, no `deps/` or `.fingerprint/`), which the
+# wrapper, test cache and target sweep do not support yet. Back to "stable"
+# once they do.
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]

@@ -200,7 +200,7 @@ pub struct GcArgs {
     /// Leave target dirs under this path alone (repeatable), e.g. a project in active development.
     #[arg(long)]
     pub exclude: Vec<PathBuf>,
-    /// Also evict store entries unused for this many days (default from config, 14).
+    /// Also evict store entries (and, with --targets, target-dir units) unused for this many days (default from config, 14).
     #[arg(long)]
     pub max_age_days: Option<f64>,
     /// Daily background trim started by the wrapper: store LRU only, quiet.

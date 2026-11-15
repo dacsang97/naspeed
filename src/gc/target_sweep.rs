@@ -1,16 +1,28 @@
 //! Remove stale `-<hash>` unit variants from a profile dir without causing
 //! rebuilds of anything still in use.
 //!
-//! File age is useless here: a no-op build touches nothing, so a crate used
-//! every day can look months old. Instead we use cargo's fingerprint graph:
-//! every `.fingerprint/<pkg>-<hash>/` holds the unit's fingerprint value
-//! (`<kind>` file, 16 hex digits) and its dependencies' fingerprint values
-//! (`<kind>.json` → `deps[i][3]`). The newest unit of each (package, kind)
-//! is a root; everything reachable from a root is live; the rest goes.
+//! File age alone is useless here: a no-op build touches nothing, so a crate
+//! used every day can look months old. Instead we use cargo's fingerprint
+//! graph: every `.fingerprint/<pkg>-<hash>/` holds the unit's fingerprint
+//! value (`<kind>` file, 16 hex digits) and its dependencies' fingerprint
+//! values (`<kind>.json` → `deps[i][3]`).
+//!
+//! Roots:
+//! - the newest unit of each (package, kind), always;
+//! - the newest unit of each (package, kind, flavor) used within `max_age`.
+//!   The flavor is the fingerprint's features, profile, target, rustflags,
+//!   config and compile kind: `cargo check`, `cargo build` and `cargo test`,
+//!   or two `-p` selections, keep separate variants of one crate that are all
+//!   in use.
+//!
+//! "Used" is the newest of a rebuild and a mark from `target_usage` (`ns dev`
+//! marks every unit its cargo runs report, fresh or rebuilt). Everything
+//! reachable from a root is live; the rest goes. The first rule alone is the
+//! original sweep, so the second one only ever keeps more.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 
@@ -37,13 +49,47 @@ impl SweepStats {
 struct Unit {
     pkg: String,
     hash: String,
-    /// (kind, own fingerprint value)
-    kinds: Vec<(String, u64)>,
+    /// (kind, own fingerprint value, flavor)
+    kinds: Vec<(String, u64, String)>,
     deps: Vec<u64>,
-    mtime: SystemTime,
+    /// Last rebuild or `target_usage` mark, whichever is newer.
+    last_used: SystemTime,
 }
 
-fn split_unit_name(name: &str) -> Option<(&str, &str)> {
+/// Fingerprint fields that tell `check`/`build`/`test` (and feature or
+/// target) variants of one crate apart.
+const FLAVOR_FIELDS: &[&str] = &[
+    "features",
+    "profile",
+    "target",
+    "rustflags",
+    "config",
+    "compile_kind",
+];
+
+fn flavor_of(json: &serde_json::Value) -> String {
+    FLAVOR_FIELDS
+        .iter()
+        .map(|f| json.get(*f).map(|v| v.to_string()).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+/// Cargo writes a fingerprint as `to_hex(u64)`: the value's little-endian
+/// bytes in hex. `deps[i][3]` in the unit JSON holds the same `u64`.
+fn parse_fingerprint(text: &str) -> Option<u64> {
+    let text = text.trim();
+    if text.len() != 16 {
+        return None;
+    }
+    let mut bytes = [0u8; 8];
+    for (i, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(text.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(u64::from_le_bytes(bytes))
+}
+
+pub(crate) fn split_unit_name(name: &str) -> Option<(&str, &str)> {
     let (pkg, hash) = name.rsplit_once('-')?;
     (hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit())).then_some((pkg, hash))
 }
@@ -51,21 +97,27 @@ fn split_unit_name(name: &str) -> Option<(&str, &str)> {
 fn read_unit(dir: &Path) -> Option<Unit> {
     let name = dir.file_name()?.to_str()?;
     let (pkg, hash) = split_unit_name(name)?;
-    let mut kinds = Vec::new();
+    let mut values = Vec::new();
+    let mut flavors: HashMap<String, String> = HashMap::new();
     let mut deps = Vec::new();
-    let mut mtime = SystemTime::UNIX_EPOCH;
+    // The dir's own mtime carries `target_usage` marks.
+    let mut last_used = std::fs::metadata(dir)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let file = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
-        if file.ends_with(".json") {
+        if let Some(kind) = file.strip_suffix(".json") {
             if let Ok(json) = std::fs::read(&path)
                 && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&json)
-                && let Some(list) = v.get("deps").and_then(|d| d.as_array())
             {
-                deps.extend(
-                    list.iter()
-                        .filter_map(|d| d.get(3).and_then(|x| x.as_u64())),
-                );
+                flavors.insert(kind.to_owned(), flavor_of(&v));
+                if let Some(list) = v.get("deps").and_then(|d| d.as_array()) {
+                    deps.extend(
+                        list.iter()
+                            .filter_map(|d| d.get(3).and_then(|x| x.as_u64())),
+                    );
+                }
             }
             continue;
         }
@@ -73,20 +125,27 @@ fn read_unit(dir: &Path) -> Option<Unit> {
             continue;
         }
         if let Ok(text) = std::fs::read_to_string(&path)
-            && let Ok(value) = u64::from_str_radix(text.trim(), 16)
+            && let Some(value) = parse_fingerprint(&text)
         {
-            kinds.push((file, value));
+            values.push((file, value));
             if let Ok(m) = entry.metadata().and_then(|m| m.modified()) {
-                mtime = mtime.max(m);
+                last_used = last_used.max(m);
             }
         }
     }
+    let kinds = values
+        .into_iter()
+        .map(|(kind, value)| {
+            let flavor = flavors.get(&kind).cloned().unwrap_or_default();
+            (kind, value, flavor)
+        })
+        .collect();
     Some(Unit {
         pkg: pkg.to_owned(),
         hash: hash.to_owned(),
         kinds,
         deps,
-        mtime,
+        last_used,
     })
 }
 
@@ -114,13 +173,18 @@ fn remove(path: &Path, dry_run: bool, stats: &mut SweepStats) {
     };
 }
 
-fn artifact_hash(name: &str) -> Option<&str> {
+pub(crate) fn artifact_hash(name: &str) -> Option<&str> {
     let stem = name.split('.').next()?;
     split_unit_name(stem).map(|(_, h)| h)
 }
 
-/// Caller holds cargo's locks for `profile`.
-pub fn sweep_profile(profile: &Path, dry_run: bool) -> Result<SweepStats> {
+/// Caller holds cargo's locks for `profile`. Units unused for longer than
+/// `max_age` are dropped unless a live unit still depends on them.
+pub fn sweep_profile(
+    profile: &Path,
+    dry_run: bool,
+    max_age: Option<Duration>,
+) -> Result<SweepStats> {
     let mut stats = SweepStats::default();
     let fp_dir = profile.join(".fingerprint");
     let units: Vec<Unit> = match std::fs::read_dir(&fp_dir) {
@@ -129,19 +193,35 @@ pub fn sweep_profile(profile: &Path, dry_run: bool) -> Result<SweepStats> {
     };
     stats.units_total = units.len();
 
-    let mut newest: HashMap<(String, String), usize> = HashMap::new();
+    let cutoff = max_age.and_then(|age| SystemTime::now().checked_sub(age));
+    let mut newest_kind: HashMap<(&str, &str), usize> = HashMap::new();
+    let mut newest_flavor: HashMap<(&str, &str, &str), usize> = HashMap::new();
     let mut by_value: HashMap<u64, Vec<usize>> = HashMap::new();
     for (i, unit) in units.iter().enumerate() {
-        for (kind, value) in &unit.kinds {
+        for (kind, value, flavor) in &unit.kinds {
             by_value.entry(*value).or_default().push(i);
-            let slot = newest.entry((unit.pkg.clone(), kind.clone())).or_insert(i);
-            if units[*slot].mtime < unit.mtime {
+            let newer = |slot: &usize| units[*slot].last_used < unit.last_used;
+            let slot = newest_kind
+                .entry((unit.pkg.as_str(), kind.as_str()))
+                .or_insert(i);
+            if newer(slot) {
+                *slot = i;
+            }
+            let slot = newest_flavor
+                .entry((unit.pkg.as_str(), kind.as_str(), flavor.as_str()))
+                .or_insert(i);
+            if newer(slot) {
                 *slot = i;
             }
         }
     }
+    let recent = |i: &usize| cutoff.is_none_or(|c| units[*i].last_used >= c);
     let mut live: HashSet<usize> = HashSet::new();
-    let mut queue: VecDeque<usize> = newest.values().copied().collect();
+    let mut queue: VecDeque<usize> = newest_kind
+        .values()
+        .copied()
+        .chain(newest_flavor.values().copied().filter(recent))
+        .collect();
     while let Some(i) = queue.pop_front() {
         if !live.insert(i) {
             continue;
@@ -226,19 +306,110 @@ mod tests {
     use super::*;
 
     fn unit(fp: &Path, name: &str, kind: &str, value: u64, deps: &[u64]) {
+        unit_with_profile(fp, name, kind, value, deps, 0);
+    }
+
+    fn unit_with_profile(
+        fp: &Path,
+        name: &str,
+        kind: &str,
+        value: u64,
+        deps: &[u64],
+        profile: u64,
+    ) {
         let dir = fp.join(name);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(kind), format!("{value:016x}")).unwrap();
+        let hex: String = value
+            .to_le_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        std::fs::write(dir.join(kind), hex).unwrap();
         let deps: Vec<_> = deps
             .iter()
             .map(|d| serde_json::json!([1, "x", false, d]))
             .collect();
         std::fs::write(
             dir.join(format!("{kind}.json")),
-            serde_json::json!({ "deps": deps }).to_string(),
+            serde_json::json!({ "deps": deps, "profile": profile }).to_string(),
         )
         .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+
+    /// Backdates a unit's files and dir, as if last built and used `days` ago.
+    fn age(fp: &Path, name: &str, days: u64) {
+        let when = filetime::FileTime::from_system_time(
+            SystemTime::now() - Duration::from_secs(days * 86_400),
+        );
+        let dir = fp.join(name);
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            filetime::set_file_mtime(entry.path(), when).unwrap();
+        }
+        filetime::set_file_mtime(&dir, when).unwrap();
+    }
+
+    #[test]
+    fn keeps_check_build_and_test_variants_of_one_crate() {
+        let t = tempfile::tempdir().unwrap();
+        let profile = t.path().join("debug");
+        let fp = profile.join(".fingerprint");
+        // Same crate and kind, three profiles: metadata-only check, build, test.
+        unit_with_profile(&fp, "core-aaaaaaaaaaaaaaaa", "lib-core", 1, &[], 11);
+        unit_with_profile(&fp, "core-bbbbbbbbbbbbbbbb", "lib-core", 2, &[], 22);
+        unit_with_profile(&fp, "core-cccccccccccccccc", "lib-core", 3, &[], 33);
+        let stats = sweep_profile(&profile, false, None).unwrap();
+        assert_eq!(stats.units_removed, 0);
+        assert!(fp.join("core-aaaaaaaaaaaaaaaa").exists());
+    }
+
+    #[test]
+    fn drops_units_unused_for_max_age_unless_a_live_unit_needs_them() {
+        let t = tempfile::tempdir().unwrap();
+        let profile = t.path().join("debug");
+        let fp = profile.join(".fingerprint");
+        let max_age = Some(Duration::from_secs(14 * 86_400));
+        // `app` in another flavor has not been used for a month; `dep` is as
+        // old but `app` in the current flavor, used today, depends on it.
+        unit_with_profile(&fp, "app-aaaaaaaaaaaaaaaa", "lib-app", 1, &[], 7);
+        unit(&fp, "dep-bbbbbbbbbbbbbbbb", "lib-dep", 2, &[]);
+        unit(&fp, "app-cccccccccccccccc", "lib-app", 3, &[2]);
+        age(&fp, "app-aaaaaaaaaaaaaaaa", 30);
+        age(&fp, "dep-bbbbbbbbbbbbbbbb", 30);
+
+        let without_age = sweep_profile(&profile, true, None).unwrap();
+        assert_eq!(without_age.units_removed, 0);
+
+        let stats = sweep_profile(&profile, false, max_age).unwrap();
+        assert_eq!(stats.units_removed, 1);
+        assert!(!fp.join("app-aaaaaaaaaaaaaaaa").exists());
+        assert!(fp.join("dep-bbbbbbbbbbbbbbbb").exists());
+        assert!(fp.join("app-cccccccccccccccc").exists());
+    }
+
+    #[test]
+    fn reads_fingerprints_as_cargo_writes_them() {
+        // `to_hex(0x0102_0304_0506_0708)` in cargo: little-endian bytes.
+        assert_eq!(
+            parse_fingerprint("0807060504030201\n"),
+            Some(0x0102_0304_0506_0708)
+        );
+        assert_eq!(parse_fingerprint("0807"), None);
+        assert_eq!(parse_fingerprint("zz07060504030201"), None);
+    }
+
+    #[test]
+    fn a_usage_mark_keeps_an_old_unit_alive() {
+        let t = tempfile::tempdir().unwrap();
+        let profile = t.path().join("debug");
+        let fp = profile.join(".fingerprint");
+        unit(&fp, "tool-aaaaaaaaaaaaaaaa", "lib-tool", 1, &[]);
+        age(&fp, "tool-aaaaaaaaaaaaaaaa", 30);
+        // A fresh (no-op) build marks the dir only.
+        filetime::set_file_mtime(fp.join("tool-aaaaaaaaaaaaaaaa"), filetime::FileTime::now())
+            .unwrap();
+        let stats = sweep_profile(&profile, false, Some(Duration::from_secs(14 * 86_400))).unwrap();
+        assert_eq!(stats.units_removed, 0);
     }
 
     #[test]
@@ -265,7 +436,7 @@ mod tests {
         ] {
             std::fs::write(deps.join(f), b"x").unwrap();
         }
-        let stats = sweep_profile(&profile, false).unwrap();
+        let stats = sweep_profile(&profile, false, None).unwrap();
         assert_eq!(stats.units_total, 7);
         assert_eq!(stats.units_removed, 2);
         assert!(!fp.join("serde-aaaaaaaaaaaaaaaa").exists());
@@ -287,7 +458,7 @@ mod tests {
         let fp = profile.join(".fingerprint");
         unit(&fp, "a-aaaaaaaaaaaaaaaa", "lib-a", 1, &[]);
         unit(&fp, "a-bbbbbbbbbbbbbbbb", "lib-a", 2, &[]);
-        let stats = sweep_profile(&profile, true).unwrap();
+        let stats = sweep_profile(&profile, true, None).unwrap();
         assert_eq!(stats.units_removed, 1);
         assert!(fp.join("a-aaaaaaaaaaaaaaaa").exists());
     }

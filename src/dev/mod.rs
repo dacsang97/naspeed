@@ -21,6 +21,7 @@ mod log_files;
 mod plain_renderer;
 mod process_supervisor;
 mod status_line;
+mod target_gc;
 mod tui;
 
 use std::io::IsTerminal;

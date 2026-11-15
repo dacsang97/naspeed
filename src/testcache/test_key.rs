@@ -151,8 +151,7 @@ pub fn key(plan: &TestPlan, package: &PackageInputs, run: &RunContext) -> Result
     }
     // Any binary of the workspace, not only the package's: an integration
     // test may run another member's binary from the profile dir.
-    // `<profile>/deps/<test>-<hash>` → `<profile>/<bin>`.
-    if let Some(profile) = run.binary.parent().and_then(Path::parent) {
+    if let Some(profile) = profile_dir(run.binary) {
         let bins = if plan.all_bins.is_empty() {
             &package.bins
         } else {
@@ -175,6 +174,20 @@ pub fn key(plan: &TestPlan, package: &PackageInputs, run: &RunContext) -> Result
         key: h.finish(),
         components: parts,
     })
+}
+
+/// The profile dir holding the uplifted `<bin>` executables, from a test
+/// binary at `<profile>/deps/<test>-<hash>` or, with cargo 1.100's build-dir
+/// layout, at `<profile>/build/<pkg>/<hash>/out/<test>-<hash>`.
+fn profile_dir(binary: &Path) -> Option<&Path> {
+    let dir = binary.parent()?;
+    if dir.file_name()? == "deps" {
+        return dir.parent();
+    }
+    let build = dir.ancestors().nth(3)?;
+    (dir.file_name()? == "out" && build.file_name()? == "build")
+        .then(|| build.parent())
+        .flatten()
 }
 
 /// Files of the workspace outside every member dir (gitignore-aware,
@@ -279,6 +292,38 @@ mod tests {
         )
         .unwrap()
         .key
+    }
+
+    #[test]
+    fn finds_the_profile_dir_in_both_target_layouts() {
+        let deps = Path::new("/t/debug/deps/app-1234");
+        assert_eq!(profile_dir(deps), Some(Path::new("/t/debug")));
+        let build = Path::new("/t/debug/build/app/9be24ce50b9f9fc7/out/it-9be24ce50b9f9fc7");
+        assert_eq!(profile_dir(build), Some(Path::new("/t/debug")));
+        let cross = Path::new("/t/aarch64-apple-darwin/release/build/app/1234/out/it-1234");
+        assert_eq!(
+            profile_dir(cross),
+            Some(Path::new("/t/aarch64-apple-darwin/release"))
+        );
+        assert_eq!(profile_dir(Path::new("/t/debug/app-1234")), None);
+    }
+
+    #[test]
+    fn a_member_binary_is_part_of_the_key_in_the_build_dir_layout() {
+        let (dir, plan, package, _) = setup();
+        let root = dir.path();
+        let unit = root.join("target/debug/build/app/9be24ce50b9f9fc7/out");
+        std::fs::create_dir_all(&unit).unwrap();
+        let binary = unit.join("it-9be24ce50b9f9fc7");
+        std::fs::write(&binary, "test binary").unwrap();
+        let env = Env::new();
+        let base = key_with(&plan, &package, &binary, &env);
+        std::fs::write(
+            root.join(crate::platform::exe_name("target/debug/tool")),
+            "tool v2",
+        )
+        .unwrap();
+        assert_ne!(key_with(&plan, &package, &binary, &env), base);
     }
 
     #[test]

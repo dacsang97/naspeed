@@ -49,6 +49,7 @@ pub fn run_loop(
         &settings.ignore,
     )?;
     let watcher = FileWatcher::start(&settings.root, &settings.watch_dirs, filter, bus.clone())?;
+    let target_gc = super::target_gc::spawn(project.graph.target_dir.clone(), bus.clone());
     let bins = settings
         .apps
         .iter()
@@ -93,6 +94,9 @@ pub fn run_loop(
         dev.run_pending(batch)?;
     }
     dev.shutdown();
+    if let Some(target_gc) = target_gc {
+        let _ = target_gc.join();
+    }
     Ok(0)
 }
 
