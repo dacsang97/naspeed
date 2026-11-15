@@ -19,6 +19,7 @@ pub mod release;
 pub mod remote;
 pub mod setup;
 pub mod store;
+pub mod target_layout;
 pub mod testcache;
 pub mod ui;
 pub mod wrapper;

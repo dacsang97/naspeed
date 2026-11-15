@@ -11,6 +11,7 @@ use anyhow::{Result, bail};
 
 use crate::cli::PurgeArgs;
 use crate::store::physical_usage::human;
+use crate::target_layout::{self, UnitFiles};
 use crate::wrapper::extern_identity::is_placed;
 
 /// `-<16 hex>` metadata hash from an artifact name like `libserde-0123…cdef.rlib`.
@@ -20,20 +21,44 @@ fn unit_hash(name: &str) -> Option<&str> {
     (hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hash)
 }
 
-fn walk_deps_dirs(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+#[derive(Default)]
+struct Removed {
+    files: u64,
+    bytes: u64,
+    fingerprints: u64,
+}
+
+/// Deletes the restored files directly in `dir`; returns the unit hashes of
+/// what it deleted.
+fn remove_placed(dir: &Path, dry_run: bool, removed: &mut Removed) -> Result<BTreeSet<String>> {
+    let mut hashes = BTreeSet::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+        return Ok(hashes);
     };
     for entry in entries.flatten() {
-        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+        let path = entry.path();
+        if !entry.file_type().is_ok_and(|t| t.is_file()) || !is_placed(&path) {
             continue;
         }
-        let path = entry.path();
-        if entry.file_name() == "deps" {
-            out.push(path);
-        } else if entry.file_name() != "incremental" && entry.file_name() != "build" {
-            walk_deps_dirs(&path, out);
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(h) = unit_hash(&name) {
+            hashes.insert(h.to_owned());
         }
+        removed.files += 1;
+        removed.bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if !dry_run {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(hashes)
+}
+
+// Without its fingerprint cargo would still consider the unit fresh if a
+// stale output of the same name came back.
+fn remove_fingerprint(dir: &Path, dry_run: bool, removed: &mut Removed) {
+    removed.fingerprints += 1;
+    if !dry_run {
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
@@ -41,39 +66,25 @@ pub fn run(args: PurgeArgs) -> Result<u8> {
     if !args.target.is_dir() {
         bail!("{} is not a directory", args.target.display());
     }
-    let mut deps_dirs = Vec::new();
-    walk_deps_dirs(&args.target, &mut deps_dirs);
-    let (mut files, mut bytes, mut fingerprints) = (0u64, 0u64, 0u64);
-    for deps in deps_dirs {
-        let mut hashes = BTreeSet::new();
-        for entry in std::fs::read_dir(&deps)?.flatten() {
-            let path = entry.path();
-            if !entry.file_type().is_ok_and(|t| t.is_file()) || !is_placed(&path) {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if let Some(h) = unit_hash(&name) {
-                hashes.insert(h.to_owned());
-            }
-            files += 1;
-            bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
-            if !args.dry_run {
-                std::fs::remove_file(&path)?;
-            }
-        }
-        // Without its fingerprint cargo would still consider the unit fresh
-        // if a stale output of the same name came back.
-        let Some(profile) = deps.parent() else {
-            continue;
-        };
-        let fp_dir = profile.join(".fingerprint");
-        if let Ok(entries) = std::fs::read_dir(&fp_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if unit_hash(&name).is_some_and(|h| hashes.contains(h)) {
-                    fingerprints += 1;
-                    if !args.dry_run {
-                        let _ = std::fs::remove_dir_all(entry.path());
+    let profiles = if target_layout::is_profile_dir(&args.target) {
+        vec![args.target.clone()]
+    } else {
+        target_layout::profile_dirs(&args.target)
+    };
+    let mut removed = Removed::default();
+    for profile in profiles {
+        // Flat layout: every unit's artifacts share `deps/`.
+        let hashes = remove_placed(&profile.join("deps"), args.dry_run, &mut removed)?;
+        for unit in target_layout::units(&profile) {
+            match &unit.files {
+                UnitFiles::Flat if hashes.contains(&unit.hash) => {
+                    remove_fingerprint(&unit.fingerprint, args.dry_run, &mut removed);
+                }
+                UnitFiles::Flat => {}
+                // Per-unit layout (cargo 1.100 on): `build/<pkg>/<hash>/out`.
+                UnitFiles::Dir(dir) => {
+                    if !remove_placed(&dir.join("out"), args.dry_run, &mut removed)?.is_empty() {
+                        remove_fingerprint(&unit.fingerprint, args.dry_run, &mut removed);
                     }
                 }
             }
@@ -81,7 +92,7 @@ pub fn run(args: PurgeArgs) -> Result<u8> {
     }
     crate::ui_info!(
         if args.dry_run { "would remove restored files" } else { "removed restored files" };
-        files = files, size = human(bytes), fingerprints = fingerprints,
+        files = removed.files, size = human(removed.bytes), fingerprints = removed.fingerprints,
         target = args.target.display());
     Ok(0)
 }

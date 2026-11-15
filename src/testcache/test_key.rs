@@ -180,14 +180,7 @@ pub fn key(plan: &TestPlan, package: &PackageInputs, run: &RunContext) -> Result
 /// binary at `<profile>/deps/<test>-<hash>` or, with cargo 1.100's build-dir
 /// layout, at `<profile>/build/<pkg>/<hash>/out/<test>-<hash>`.
 fn profile_dir(binary: &Path) -> Option<&Path> {
-    let dir = binary.parent()?;
-    if dir.file_name()? == "deps" {
-        return dir.parent();
-    }
-    let build = dir.ancestors().nth(3)?;
-    (dir.file_name()? == "out" && build.file_name()? == "build")
-        .then(|| build.parent())
-        .flatten()
+    crate::target_layout::library_profile(binary.parent()?)
 }
 
 /// Files of the workspace outside every member dir (gitignore-aware,
@@ -300,7 +293,9 @@ mod tests {
         assert_eq!(profile_dir(deps), Some(Path::new("/t/debug")));
         let build = Path::new("/t/debug/build/app/9be24ce50b9f9fc7/out/it-9be24ce50b9f9fc7");
         assert_eq!(profile_dir(build), Some(Path::new("/t/debug")));
-        let cross = Path::new("/t/aarch64-apple-darwin/release/build/app/1234/out/it-1234");
+        let cross = Path::new(
+            "/t/aarch64-apple-darwin/release/build/app/0123456789abcdef/out/it-0123456789abcdef",
+        );
         assert_eq!(
             profile_dir(cross),
             Some(Path::new("/t/aarch64-apple-darwin/release"))

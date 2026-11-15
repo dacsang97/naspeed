@@ -134,6 +134,48 @@ impl Sandbox {
     }
 }
 
+/// Every artifact file rustc wrote into `profile`: `deps/` (cargo 1.99 and
+/// earlier) or each unit's `build/<pkg>/<hash>/out/` (cargo 1.100 on).
+#[allow(dead_code)]
+pub fn artifacts(profile: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![profile.join("deps")];
+    dirs.extend(unit_dirs(profile).into_iter().map(|unit| unit.join("out")));
+    dirs.iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flat_map(|rd| rd.flatten().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .collect()
+}
+
+/// Each unit dir under `profile/build`: `build/<pkg>-<hash>` (cargo 1.99 and
+/// earlier, build scripts only) or `build/<pkg>/<hash>` (cargo 1.100 on).
+#[allow(dead_code)]
+pub fn unit_dirs(profile: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(profile.join("build")) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let hashed = |p: &Path| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.len() == 16 && n.bytes().all(|b| b.is_ascii_hexdigit()))
+        };
+        let nested: Vec<PathBuf> = std::fs::read_dir(&path)
+            .into_iter()
+            .flat_map(|rd| rd.flatten().map(|e| e.path()))
+            .filter(|p| p.is_dir() && hashed(p))
+            .collect();
+        if nested.is_empty() {
+            out.push(path);
+        } else {
+            out.extend(nested);
+        }
+    }
+    out
+}
+
 impl Drop for Sandbox {
     fn drop(&mut self) {
         if !std::thread::panicking() {
