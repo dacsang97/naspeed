@@ -58,6 +58,18 @@ apps. A failed check or build keeps existing processes alive, and Cargo is not
 interrupted for ordinary file changes. Files observed during the cycle run in
 the next cycle.
 
+While `ns dev` runs it keeps `target/` from growing without bound: cargo never
+deletes old artifacts on its own. Every cargo check and build it starts marks
+the units cargo reports, fresh ones included, as used. Five minutes after
+start and then every 30 minutes, a background thread runs the
+`naspeed gc --targets` sweep on the project's profile dirs and prints what it
+freed as a status line. A profile dir cargo is using at that moment is left
+for the next round. Units that `ns check`, `ns test` or a plain `cargo` reuse
+without rebuilding are not marked, so for them "used" means last rebuilt; the
+newest variant of each crate is always kept, so at worst a variant that only
+those commands use and that has not been rebuilt for `store_max_age_days`
+(default 14) is rebuilt once. `NASPEED_NO_AUTO_GC=1` turns the thread off.
+
 `log_dir` defaults to `true`, writing `build.log` and one `<bin>.log` beneath
 `target/ns-dev`; a string selects another directory and `false` disables files.
 Each session truncates its files, strips ANSI controls, timestamps lines, and

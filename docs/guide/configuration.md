@@ -36,7 +36,7 @@ These override the file:
 | `NASPEED_WORKSPACE_CACHE=0` | Do not cache workspace crates |
 | `NASPEED_WORKSPACE_CACHE_MAX_ENTRY_MB` | Size limit for a stored workspace crate (0: none) |
 | `NASPEED_MIN_FREE_DISK_PCT` | Free-space floor for storing misses (0: off) |
-| `NASPEED_NO_AUTO_GC=1` | No background trim (daily, or every 30 min below the free-space floor) |
+| `NASPEED_NO_AUTO_GC=1` | No background trim (daily, or every 30 min below the free-space floor), and no target sweep in `ns dev` |
 | `NASPEED_WARM_INCREMENTAL=0` | No background incremental warm-up after a hit |
 | `NASPEED_REMOTES=url,url` | Peer stores for this shell (empty: none) |
 | `NASPEED_REMOTE_TOKEN` | Token for peers and `serve` |

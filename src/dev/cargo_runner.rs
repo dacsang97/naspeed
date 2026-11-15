@@ -48,6 +48,8 @@ pub struct CargoOutcome {
 struct Messages {
     errors: Vec<String>,
     executables: Vec<(String, PathBuf)>,
+    /// Artifact paths of every unit cargo reported, fresh or rebuilt.
+    used: Vec<PathBuf>,
 }
 
 /// Folds one line of cargo's JSON stream into `out`.
@@ -55,6 +57,8 @@ fn parse_message(line: &str, out: &mut Messages) {
     let Ok(msg) = serde_json::from_str::<Value>(line) else {
         return;
     };
+    out.used
+        .extend(crate::gc::target_usage::message_paths(&msg));
     match msg["reason"].as_str() {
         Some("compiler-message") => {
             let diag = &msg["message"];
@@ -134,6 +138,8 @@ pub fn run_cargo(
     child.stop(STOP_GRACE);
     let messages = messages.join().unwrap_or_default();
     let _ = stderr.join();
+    // Lets the background target sweep tell unchanged units from unused ones.
+    crate::gc::target_usage::mark_used(&messages.used);
     Ok(CargoOutcome {
         success: !interrupted && status.is_some_and(|s| s.success()),
         errors: messages.errors,
