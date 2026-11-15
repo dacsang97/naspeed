@@ -90,9 +90,16 @@ pub fn run(args: GcArgs) -> Result<u8> {
         }
 
         if args.targets {
+            let age_days = args.max_age_days.unwrap_or(settings.store_max_age_days);
+            let max_age =
+                (age_days > 0.0).then(|| std::time::Duration::from_secs_f64(age_days * 86_400.0));
             let mut total = target_sweep::SweepStats::default();
             for (profile, _) in &locked {
-                total.add(&target_sweep::sweep_profile(profile, args.dry_run)?);
+                total.add(&target_sweep::sweep_profile(
+                    profile,
+                    args.dry_run,
+                    max_age,
+                )?);
             }
             crate::ui_info!(format!("swept target dirs, {verb} {}", human(total.bytes_freed));
                 stale_units = format!("{}/{}", total.units_removed, total.units_total),

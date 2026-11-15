@@ -6,7 +6,7 @@
 | `naspeed status --check` | Also builds a tiny crate with `cargo build -v` and confirms naspeed wraps `rustc` |
 | `naspeed stats [--days N] [--json]` | Time saved: compile time of every rustc/build-script hit minus its restore time, test runs replayed by `ns test` and their run time, entries fetched from peers, and the crates that saved the most |
 | `naspeed gc [--max-size-gb N] [--max-age-days D]` | Evicts store entries least-recently-used first until the store is under the cap (default 20 GB), and drops entries unused for D days (default 14). Runs on its own in the background at most once a day; `NASPEED_NO_AUTO_GC=1` turns that off |
-| `naspeed gc --targets` | Removes stale `-<hash>` variants and old incremental sessions from registered target dirs |
+| `naspeed gc --targets [--max-age-days D]` | Removes stale `-<hash>` variants and old incremental sessions from registered target dirs. Kept: the newest variant of each crate, the newest of each flavor (features, profile, target, flags: `check`, `build` and `test` variants stay) used within D days (default 14), and everything they depend on |
 | `naspeed gc --dedup` | Replaces byte-identical files of 64 KiB or more across target dirs with clones |
 | `naspeed purge --target <dir>` | Deletes the artifacts naspeed restored into a target dir, plus their fingerprints |
 | `naspeed build --target universal2-apple-darwin` | Builds both macOS architectures, then runs `lipo -create` |
