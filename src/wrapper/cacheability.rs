@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use super::Env;
 use super::rustc_args::RustcInvocation;
+use crate::target_layout;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceKind {
@@ -20,10 +21,12 @@ pub enum SourceKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnitKind {
-    /// `lib` / `rlib` / `proc-macro` into `<profile>/deps`.
+    /// `lib` / `rlib` / `proc-macro` into `<profile>/deps`, or with cargo
+    /// 1.100's layout `<profile>/build/<pkg>/<hash>/out`.
     Library,
     /// A registry crate's `build.rs` compiled to
-    /// `<profile>/build/<pkg>-<hash>/build_script_build-<hash>`.
+    /// `<profile>/build/<pkg>-<hash>/build_script_build-<hash>`, or
+    /// `<profile>/build/<pkg>/<hash>/out/build_script_build`.
     BuildScript,
 }
 
@@ -135,23 +138,18 @@ pub fn check(
     let Some(out_dir) = inv.out_dir.as_ref().map(|d| cwd.join(d)) else {
         return Err("no --out-dir".into());
     };
-    fn dir_name(p: Option<&Path>) -> Option<&str> {
-        p.and_then(Path::file_name).and_then(|n| n.to_str())
-    }
     let (kind, profile_dir) = if build_script {
-        // <profile>/build/<pkg>-<hash>
-        let units = out_dir.parent();
-        if dir_name(units) != Some("build") {
-            return Err("build script --out-dir is not <profile>/build/<unit>".into());
-        }
-        (UnitKind::BuildScript, units.and_then(Path::parent))
+        let Some(profile) = target_layout::build_script_profile(&out_dir) else {
+            return Err("build script --out-dir is not a unit dir under <profile>/build".into());
+        };
+        (UnitKind::BuildScript, profile)
     } else {
-        if dir_name(Some(&out_dir)) != Some("deps") {
-            return Err("--out-dir is not <profile>/deps".into());
-        }
-        (UnitKind::Library, out_dir.parent())
+        let Some(profile) = target_layout::library_profile(&out_dir) else {
+            return Err("--out-dir is not <profile>/deps or a unit's out dir".into());
+        };
+        (UnitKind::Library, profile)
     };
-    let profile_dir = profile_dir.map(Path::to_path_buf).unwrap_or_default();
+    let profile_dir = profile_dir.to_path_buf();
 
     Ok(Cacheable {
         kind,

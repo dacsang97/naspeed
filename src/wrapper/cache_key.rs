@@ -167,8 +167,7 @@ impl Contents for FsContents<'_> {
     }
 
     fn build_script_stdout(&self, out_dir: &Path) -> Result<String> {
-        // Cargo keeps the script's stdout next to its OUT_DIR.
-        let output = out_dir.parent().unwrap_or(out_dir).join("output");
+        let output = crate::target_layout::build_script_stdout(out_dir);
         std::fs::read_to_string(&output).with_context(|| format!("read {}", output.display()))
     }
 

@@ -207,15 +207,6 @@ struct Run<'a> {
     min_free_disk_pct: f64,
 }
 
-/// `<profile>/build/<unit>/out` → `<profile>`
-fn profile_of(out_dir: &Path) -> Option<PathBuf> {
-    let unit = out_dir.parent()?;
-    let build = unit.parent()?;
-    (out_dir.file_name()? == "out" && build.file_name()? == "build")
-        .then(|| build.parent().map(Path::to_path_buf))
-        .flatten()
-}
-
 fn tool_identity(name: &str, env: &Env) -> String {
     let Some(path) = env.get("PATH").and_then(|p| {
         std::env::split_paths(p)
@@ -277,7 +268,7 @@ impl<'a> Run<'a> {
             .unwrap_or_else(cargo_home);
         let (source_kind, source_root) =
             source_root(&manifest_dir.join("Cargo.toml"), &cargo_home)?;
-        let profile_dir = profile_of(&out_dir)?;
+        let profile_dir = crate::target_layout::build_script_run_profile(&out_dir)?.to_path_buf();
         let store_root = volume_root::store_for(&out_dir, &settings.stores)?;
         let store = Store::open(&store_root, settings.cow_mode).ok()?;
         let toolchain = toolchain_fingerprint::resolve(
@@ -647,10 +638,18 @@ mod tests {
 
     #[test]
     fn profile_dir_from_out_dir() {
+        use crate::target_layout::build_script_run_profile;
         assert_eq!(
-            profile_of(Path::new("/t/debug/build/zstd-sys-0123/out")),
-            Some(PathBuf::from("/t/debug"))
+            build_script_run_profile(Path::new("/t/debug/build/zstd-sys-0123/out")),
+            Some(Path::new("/t/debug"))
         );
-        assert_eq!(profile_of(Path::new("/t/debug/deps/out")), None);
+        assert_eq!(
+            build_script_run_profile(Path::new("/t/debug/build/zstd-sys/0123456789abcdef/out")),
+            Some(Path::new("/t/debug"))
+        );
+        assert_eq!(
+            build_script_run_profile(Path::new("/t/debug/deps/out")),
+            None
+        );
     }
 }

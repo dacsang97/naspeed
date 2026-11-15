@@ -52,21 +52,22 @@ fn second_target_dir_hits_and_stays_fresh() {
     // Restored registry artifacts are clones: almost no private bytes.
     #[cfg(target_os = "macos")]
     {
-        let deps1 = naspeed::store::physical_usage::tree_usage(&sb.root.join("t1/debug/deps"));
-        let restored: u64 = std::fs::read_dir(sb.root.join("t2/debug/deps"))
-            .unwrap()
-            .flatten()
-            .filter(|e| naspeed::wrapper::extern_identity::is_placed(&e.path()))
-            .map(|e| {
-                naspeed::store::physical_usage::file_usage(&e.path())
+        let logical: u64 = common::artifacts(&sb.root.join("t1/debug"))
+            .iter()
+            .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .sum();
+        let restored: u64 = common::artifacts(&sb.root.join("t2/debug"))
+            .iter()
+            .filter(|p| naspeed::wrapper::extern_identity::is_placed(p))
+            .map(|p| {
+                naspeed::store::physical_usage::file_usage(p)
                     .private
                     .unwrap_or(0)
             })
             .sum();
         assert!(
-            restored < deps1.logical / 10,
-            "restored files use {restored} private bytes vs {} logical deps",
-            deps1.logical
+            restored < logical / 10,
+            "restored files use {restored} private bytes vs {logical} logical deps"
         );
     }
 
@@ -172,12 +173,10 @@ fn rustc_rebuild_replaces_output_inode() {
     use std::os::unix::fs::MetadataExt;
     let sb = Sandbox::new("inode");
     sb.run("t", &["build"]);
-    let deps = sb.root.join("t/debug/deps");
+    let profile = sb.root.join("t/debug");
     let rlib = || {
-        std::fs::read_dir(&deps)
-            .unwrap()
-            .flatten()
-            .map(|e| e.path())
+        common::artifacts(&profile)
+            .into_iter()
             .find(|p| {
                 let n = p.file_name().unwrap().to_string_lossy().into_owned();
                 n.starts_with("liblz4_sys-") && n.ends_with(".rlib")
@@ -254,15 +253,21 @@ fn build_script_run_is_reused_across_target_dirs() {
 
     // The restored OUT_DIR holds the C library, and the launcher replaced the
     // build-script binary.
-    let build = sb.root.join("t2/debug/build");
-    let lib = std::fs::read_dir(&build)
-        .unwrap()
-        .flatten()
-        .map(|e| e.path().join("out/liblz4.a"))
+    let units = common::unit_dirs(&sb.root.join("t2/debug"));
+    let lib = units
+        .iter()
+        .map(|unit| unit.join("out/liblz4.a"))
         .find(|p| p.is_file());
     assert!(lib.is_some(), "liblz4.a restored into OUT_DIR");
-    let launcher = std::fs::read_dir(&build).unwrap().flatten().any(|e| {
-        naspeed::wrapper::build_script_run::is_launcher(&e.path().join("build-script-build"))
+    // `build/<pkg>-<hash>/build-script-build`, or with cargo 1.100's layout
+    // `build/<pkg>/<hash>/out/build_script_build`.
+    let launcher = units.iter().any(|unit| {
+        [
+            unit.join("build-script-build"),
+            unit.join("out/build_script_build"),
+        ]
+        .iter()
+        .any(|bin| naspeed::wrapper::build_script_run::is_launcher(bin))
     });
     assert!(launcher);
 
