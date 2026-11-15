@@ -14,15 +14,11 @@ fn fresh(sb: &Sandbox, target: &str, args: &[&str]) {
     assert!(!stderr.contains("Compiling"), "rebuilt after gc:\n{stderr}");
 }
 
+/// Units of `pkg` in `profile`, in either of cargo's target layouts.
 fn units(profile: &Path, pkg: &str) -> usize {
-    std::fs::read_dir(profile.join(".fingerprint"))
-        .unwrap()
-        .flatten()
-        .filter(|e| {
-            let n = e.file_name().to_string_lossy().into_owned();
-            n.rsplit_once('-')
-                .is_some_and(|(p, h)| p == pkg && h.len() == 16)
-        })
+    naspeed::target_layout::units(profile)
+        .iter()
+        .filter(|u| u.pkg == pkg)
         .count()
 }
 
@@ -32,11 +28,9 @@ fn dedup_shares_identical_build_output_without_rebuild() {
     sb.run("w1", &["build"]);
     sb.run("w2", &["build"]);
     let find_table = |t: &str| {
-        let build = sb.root.join(t).join("debug/build");
-        std::fs::read_dir(&build)
-            .unwrap()
-            .flatten()
-            .map(|e| e.path().join("out/table.bin"))
+        common::unit_dirs(&sb.root.join(t).join("debug"))
+            .into_iter()
+            .map(|unit| unit.join("out/table.bin"))
             .find(|p| p.is_file())
             .unwrap()
     };
@@ -66,14 +60,11 @@ fn backdate_units(profile: &Path) {
     let month_ago = filetime::FileTime::from_system_time(
         std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86_400),
     );
-    for unit in std::fs::read_dir(profile.join(".fingerprint"))
-        .unwrap()
-        .flatten()
-    {
-        for file in std::fs::read_dir(unit.path()).unwrap().flatten() {
+    for unit in naspeed::target_layout::units(profile) {
+        for file in std::fs::read_dir(&unit.fingerprint).unwrap().flatten() {
             filetime::set_file_mtime(file.path(), month_ago).unwrap();
         }
-        filetime::set_file_mtime(unit.path(), month_ago).unwrap();
+        filetime::set_file_mtime(&unit.fingerprint, month_ago).unwrap();
     }
 }
 

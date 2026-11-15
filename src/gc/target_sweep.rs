@@ -1,6 +1,10 @@
 //! Remove stale `-<hash>` unit variants from a profile dir without causing
 //! rebuilds of anything still in use.
 //!
+//! Units are read in either of cargo's layouts (see `target_layout`): the
+//! flat one spreads a unit over `.fingerprint/`, `deps/` and `build/`, the
+//! per-unit one (cargo 1.100 on) keeps it all in `build/<pkg>/<hash>/`.
+//!
 //! File age alone is useless here: a no-op build touches nothing, so a crate
 //! used every day can look months old. Instead we use cargo's fingerprint
 //! graph: every `.fingerprint/<pkg>-<hash>/` holds the unit's fingerprint
@@ -26,6 +30,8 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 
+use crate::target_layout::{self, UnitDir, UnitFiles};
+
 #[derive(Debug, Default, Clone)]
 pub struct SweepStats {
     pub units_total: usize,
@@ -49,6 +55,8 @@ impl SweepStats {
 struct Unit {
     pkg: String,
     hash: String,
+    fingerprint: PathBuf,
+    files: UnitFiles,
     /// (kind, own fingerprint value, flavor)
     kinds: Vec<(String, u64, String)>,
     deps: Vec<u64>,
@@ -89,14 +97,8 @@ fn parse_fingerprint(text: &str) -> Option<u64> {
     Some(u64::from_le_bytes(bytes))
 }
 
-pub(crate) fn split_unit_name(name: &str) -> Option<(&str, &str)> {
-    let (pkg, hash) = name.rsplit_once('-')?;
-    (hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit())).then_some((pkg, hash))
-}
-
-fn read_unit(dir: &Path) -> Option<Unit> {
-    let name = dir.file_name()?.to_str()?;
-    let (pkg, hash) = split_unit_name(name)?;
+fn read_unit(unit: UnitDir) -> Option<Unit> {
+    let dir = unit.fingerprint.as_path();
     let mut values = Vec::new();
     let mut flavors: HashMap<String, String> = HashMap::new();
     let mut deps = Vec::new();
@@ -141,8 +143,10 @@ fn read_unit(dir: &Path) -> Option<Unit> {
         })
         .collect();
     Some(Unit {
-        pkg: pkg.to_owned(),
-        hash: hash.to_owned(),
+        pkg: unit.pkg,
+        hash: unit.hash,
+        fingerprint: unit.fingerprint,
+        files: unit.files,
         kinds,
         deps,
         last_used,
@@ -173,9 +177,9 @@ fn remove(path: &Path, dry_run: bool, stats: &mut SweepStats) {
     };
 }
 
-pub(crate) fn artifact_hash(name: &str) -> Option<&str> {
+fn artifact_hash(name: &str) -> Option<&str> {
     let stem = name.split('.').next()?;
-    split_unit_name(stem).map(|(_, h)| h)
+    target_layout::split_unit_name(stem).map(|(_, h)| h)
 }
 
 /// Caller holds cargo's locks for `profile`. Units unused for longer than
@@ -186,11 +190,10 @@ pub fn sweep_profile(
     max_age: Option<Duration>,
 ) -> Result<SweepStats> {
     let mut stats = SweepStats::default();
-    let fp_dir = profile.join(".fingerprint");
-    let units: Vec<Unit> = match std::fs::read_dir(&fp_dir) {
-        Ok(rd) => rd.flatten().filter_map(|e| read_unit(&e.path())).collect(),
-        Err(_) => return Ok(stats),
-    };
+    let units: Vec<Unit> = target_layout::units(profile)
+        .into_iter()
+        .filter_map(read_unit)
+        .collect();
     stats.units_total = units.len();
 
     let cutoff = max_age.and_then(|age| SystemTime::now().checked_sub(age));
@@ -241,14 +244,27 @@ pub fn sweep_profile(
         .filter(|(i, u)| !live.contains(i) && !u.kinds.is_empty())
         .map(|(_, u)| u)
         .collect();
-    let dead_hashes: HashSet<&str> = dead.iter().map(|u| u.hash.as_str()).collect();
+    let mut dead_hashes: HashSet<&str> = HashSet::new();
     stats.units_removed = dead.len();
     for unit in &dead {
-        let name = format!("{}-{}", unit.pkg, unit.hash);
-        remove(&fp_dir.join(&name), dry_run, &mut stats);
-        let build = profile.join("build").join(&name);
-        if build.exists() {
-            remove(&build, dry_run, &mut stats);
+        match &unit.files {
+            UnitFiles::Flat => {
+                dead_hashes.insert(unit.hash.as_str());
+                remove(&unit.fingerprint, dry_run, &mut stats);
+                let build = profile
+                    .join("build")
+                    .join(format!("{}-{}", unit.pkg, unit.hash));
+                if build.exists() {
+                    remove(&build, dry_run, &mut stats);
+                }
+            }
+            UnitFiles::Dir(dir) => {
+                remove(dir, dry_run, &mut stats);
+                if !dry_run && let Some(pkg) = dir.parent() {
+                    // Only succeeds once the package has no unit left.
+                    let _ = std::fs::remove_dir(pkg);
+                }
+            }
         }
     }
     for sub in ["deps", "examples"] {
@@ -449,6 +465,73 @@ mod tests {
         assert!(!deps.join("libserde-aaaaaaaaaaaaaaaa.rlib").exists());
         assert!(deps.join("libsyn-cccccccccccccccc.rlib").exists());
         assert!(deps.join("libapp-1111111111111111.rlib").exists());
+    }
+
+    /// A unit in cargo 1.100's layout: `build/<pkg>/<hash>/{fingerprint,out}`.
+    fn per_unit(profile: &Path, pkg: &str, hash: &str, kind: &str, value: u64, deps: &[u64]) {
+        let dir = profile.join("build").join(pkg).join(hash);
+        let fp = dir.join("fingerprint");
+        std::fs::create_dir_all(&fp).unwrap();
+        std::fs::create_dir_all(dir.join("out")).unwrap();
+        std::fs::write(dir.join("out").join(format!("lib{pkg}-{hash}.rlib")), b"x").unwrap();
+        let hex: String = value
+            .to_le_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        std::fs::write(fp.join(kind), hex).unwrap();
+        let deps: Vec<_> = deps
+            .iter()
+            .map(|d| serde_json::json!([1, "x", false, d]))
+            .collect();
+        std::fs::write(
+            fp.join(format!("{kind}.json")),
+            serde_json::json!({ "deps": deps, "profile": 0 }).to_string(),
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+
+    #[test]
+    fn sweeps_units_in_the_per_unit_layout() {
+        let t = tempfile::tempdir().unwrap();
+        let profile = t.path().join("debug");
+        // `serde` old variant, unreachable; `serde` new one used by `app`.
+        per_unit(&profile, "serde", "aaaaaaaaaaaaaaaa", "lib-serde", 1, &[]);
+        per_unit(&profile, "serde", "bbbbbbbbbbbbbbbb", "lib-serde", 2, &[]);
+        per_unit(&profile, "app", "cccccccccccccccc", "lib-app", 3, &[2]);
+        // `gone` has a single, superseded-by-nothing unit; `old` two.
+        per_unit(&profile, "old", "dddddddddddddddd", "lib-old", 4, &[]);
+        per_unit(&profile, "old", "eeeeeeeeeeeeeeee", "lib-old", 5, &[]);
+        let stats = sweep_profile(&profile, false, None).unwrap();
+        assert_eq!(stats.units_total, 5);
+        assert_eq!(stats.units_removed, 2);
+        let unit = |pkg: &str, hash: &str| profile.join("build").join(pkg).join(hash);
+        assert!(!unit("serde", "aaaaaaaaaaaaaaaa").exists());
+        assert!(unit("serde", "bbbbbbbbbbbbbbbb").exists());
+        assert!(unit("app", "cccccccccccccccc").exists());
+        assert!(!unit("old", "dddddddddddddddd").exists());
+        assert!(unit("old", "eeeeeeeeeeeeeeee").exists());
+    }
+
+    #[test]
+    fn drops_an_emptied_package_dir_in_the_per_unit_layout() {
+        let t = tempfile::tempdir().unwrap();
+        let profile = t.path().join("debug");
+        per_unit(&profile, "a", "aaaaaaaaaaaaaaaa", "lib-a", 1, &[]);
+        per_unit(&profile, "a", "bbbbbbbbbbbbbbbb", "lib-a", 2, &[]);
+        let fp = profile.join("build/a/aaaaaaaaaaaaaaaa/fingerprint");
+        let old = filetime::FileTime::from_system_time(
+            SystemTime::now() - Duration::from_secs(30 * 86_400),
+        );
+        filetime::set_file_mtime(fp.join("lib-a"), old).unwrap();
+        filetime::set_file_mtime(&fp, old).unwrap();
+        sweep_profile(&profile, false, None).unwrap();
+        assert!(!profile.join("build/a/aaaaaaaaaaaaaaaa").exists());
+        assert!(
+            profile.join("build/a").exists(),
+            "the package still has a unit"
+        );
     }
 
     #[test]

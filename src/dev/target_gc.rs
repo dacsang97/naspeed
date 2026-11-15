@@ -16,6 +16,7 @@ use super::process_supervisor::shutdown_requested;
 use super::status_line;
 use crate::gc::{cargo_build_lock, target_sweep};
 use crate::store::physical_usage::human;
+use crate::target_layout;
 
 /// First sweep once the initial check and build have settled.
 const FIRST_DELAY: Duration = Duration::from_secs(5 * 60);
@@ -43,7 +44,7 @@ pub fn spawn(target_dir: PathBuf, bus: LogBus) -> Option<JoinHandle<()>> {
 
 fn sweep_once(target_dir: &Path, max_age: Option<Duration>, bus: &LogBus) {
     let mut total = target_sweep::SweepStats::default();
-    for profile in profile_dirs(target_dir) {
+    for profile in target_layout::profile_dirs(target_dir) {
         if shutdown_requested() {
             return;
         }
@@ -69,57 +70,6 @@ fn sweep_once(target_dir: &Path, max_age: Option<Duration>, bus: &LogBus) {
                 total.units_removed,
                 total.incremental_sessions_removed
             ),
-        );
-    }
-}
-
-/// `target/<profile>` and `target/<triple>/<profile>` dirs cargo has built in.
-fn profile_dirs(target_dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let Ok(level1) = std::fs::read_dir(target_dir) else {
-        return out;
-    };
-    for entry in level1.flatten() {
-        let dir = entry.path();
-        if dir.join(".fingerprint").is_dir() {
-            out.push(dir);
-        } else if let Ok(level2) = std::fs::read_dir(&dir) {
-            out.extend(
-                level2
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.join(".fingerprint").is_dir()),
-            );
-        }
-    }
-    out.sort();
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn finds_host_and_cross_profile_dirs_only() {
-        let t = tempfile::tempdir().unwrap();
-        let target = t.path();
-        for dir in [
-            "debug/.fingerprint",
-            "release/.fingerprint",
-            "aarch64-unknown-linux-gnu/debug/.fingerprint",
-            "tmp",
-            "doc/core",
-        ] {
-            std::fs::create_dir_all(target.join(dir)).unwrap();
-        }
-        assert_eq!(
-            profile_dirs(target),
-            vec![
-                target.join("aarch64-unknown-linux-gnu/debug"),
-                target.join("debug"),
-                target.join("release"),
-            ]
         );
     }
 }

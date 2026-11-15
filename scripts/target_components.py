@@ -12,6 +12,7 @@ import subprocess
 import sys
 
 HASHED = re.compile(r"^(?:lib)?(?P<name>.+?)-[0-9a-f]{16}(?:\..*)?$")
+UNIT_HASH = re.compile(r"[0-9a-f]{16}")
 
 
 def blocks(path):
@@ -51,9 +52,10 @@ def main(target):
     ws = workspace_names(os.path.dirname(target))
     split = {"registry": 0, "workspace": 0, "incremental": 0, "build_out": 0, "other": 0}
 
-    for root, dirs, _files in os.walk(target):
-        # A profile dir is any dir that directly holds deps/ (target/<profile> or target/<triple>/<profile>).
-        if "deps" not in dirs:
+    for root, dirs, files in os.walk(target):
+        # A profile dir (target/<profile> or target/<triple>/<profile>) holds deps/,
+        # or with cargo 1.100's per-unit layout build/ next to .cargo-lock.
+        if "deps" not in dirs and not ("build" in dirs and ".cargo-lock" in files):
             continue
         for sub in list(dirs):
             path = os.path.join(root, sub)
@@ -68,6 +70,20 @@ def main(target):
             elif sub == "build":
                 for entry in os.listdir(path):
                     pkg_dir = os.path.join(path, entry)
+                    units = [u for u in os.listdir(pkg_dir) if UNIT_HASH.fullmatch(u)] \
+                        if os.path.isdir(pkg_dir) else []
+                    if units:
+                        # Per-unit layout: build/<pkg>/<hash>/; a build-script run has run/
+                        # and its out/ is the OUT_DIR, other units keep artifacts in out/.
+                        bucket = "workspace" if entry.replace("-", "_") in ws else "registry"
+                        for unit in units:
+                            unit_dir = os.path.join(pkg_dir, unit)
+                            out_dir = os.path.join(unit_dir, "out")
+                            is_run = os.path.isdir(os.path.join(unit_dir, "run"))
+                            out = blocks(out_dir) if is_run and os.path.isdir(out_dir) else 0
+                            split["build_out"] += out
+                            split[bucket] += blocks(unit_dir) - out
+                        continue
                     out_dir = os.path.join(pkg_dir, "out")
                     out = blocks(out_dir) if os.path.isdir(out_dir) else 0
                     split["build_out"] += out
