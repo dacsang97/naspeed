@@ -7,7 +7,9 @@ slot pool also caps how many `rustc` run at once.
 
 ## Requirements
 
-- Rust 1.98 or newer (the repo pins `stable` in `rust-toolchain.toml`).
+- Rust 1.98 or newer (the repo pins `stable` in `rust-toolchain.toml`). Both
+  of cargo's target layouts are supported: the flat `deps/` + `.fingerprint/`
+  one and the per-unit `build/<pkg>/<hash>/` one that cargo 1.100 always uses.
 - macOS, Linux or Windows. Disk savings need a filesystem with clones: APFS,
   btrfs, xfs, or ReFS (a Windows [Dev Drive](https://learn.microsoft.com/windows/dev-drive/)).
   On other filesystems (ext4, NTFS) naspeed still speeds builds up but saves
