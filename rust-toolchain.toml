@@ -4,3 +4,4 @@
 # wrapper, test cache and target sweep do not support yet. Back to "stable"
 # once they do.
 channel = "1.99.1"
+components = ["clippy", "rustfmt"]
