@@ -124,15 +124,39 @@ A script that reads a variable or file without declaring it is not re-run by
 cargo either. Across target dirs, naspeed reuses the result just as cargo would
 within one target dir.
 
-## Machine-wide slots
+## Machine-wide slots and memory admission
 
 Each `rustc` that really runs, whether passed through or a miss, holds one of N
 `flock`ed slot files in `~/.config/naspeed/slots/`. The default N is the number
-of logical cores. A killed process releases its slot automatically. Before
-starting, naspeed waits up to 30 seconds while available memory is below
-`min_free_mem_mb` (default 1536). Available memory means free + inactive +
-purgeable pages on macOS, `MemAvailable` on Linux, and available physical
-memory on Windows.
+of logical cores, but at most one per 2 GiB of RAM (a 16 GB machine gets at most
+8). A killed process releases its slot automatically.
+
+A slot alone does not start rustc; memory admission does:
+
+- **Learned peaks.** After every rustc, naspeed records the child's peak
+  resident size in `~/.config/naspeed/rustc-memory.sqlite`, keyed by crate,
+  test harness or not, full build or metadata only, and opt level. A bigger
+  sample replaces the stored peak at once; a smaller one lowers it slowly. A job
+  never seen before is assumed to need 512 MiB.
+- **Reservations.** An admitted rustc leaves its expected peak next to its slot
+  (`<slot>.res`). A new rustc starts only when available memory covers what the
+  running ones are still expected to take (their reservations minus what they
+  already hold), its own expected peak, and `min_free_mem_mb` (default 1024) on
+  top. Decisions are taken one at a time, so wrappers that start together cannot
+  all pass the same check.
+- **Kernel pressure.** While the kernel reports memory pressure (macOS pressure
+  level warning or critical; Linux PSI `some avg10` of 10% or more), no further
+  rustc starts.
+- **Progress.** With no other admitted rustc running, the next one starts
+  whatever the memory state, so a build never hangs. Otherwise it waits as long
+  as needed (logged every 30 seconds with `NASPEED_LOG=info`).
+
+Available memory means free + purgeable pages + the file-backed part of the
+inactive list on macOS (anonymous inactive pages are left out: freeing them
+costs compression or swap), `MemAvailable` on Linux, and available physical
+memory on Windows. `naspeed status` shows it, the pressure state, what running
+rustc still reserve, and the largest learned peaks. `min_free_mem_mb = 0` turns
+memory admission off and leaves only the slot limit.
 
 rustc still honors cargo's own jobserver. naspeed's slots are an extra,
 machine-level limit. Build scripts (for example the `cc` crate compiling C) and

@@ -13,7 +13,7 @@ pub struct Slot {
     _lock: FileLock,
 }
 
-fn slot_path(dir: &Path, i: usize) -> PathBuf {
+pub(crate) fn slot_path(dir: &Path, i: usize) -> PathBuf {
     dir.join(format!("{i}.lock"))
 }
 

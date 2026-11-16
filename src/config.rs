@@ -6,7 +6,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use toml_edit::{DocumentMut, value};
 
-pub const DEFAULT_MIN_FREE_MEM_MB: u64 = 1536;
+/// Memory left untouched on top of the running jobs' reservations. Each
+/// rustc also reserves its own learned peak, so this is only a safety margin
+/// for everything else on the machine.
+pub const DEFAULT_MIN_FREE_MEM_MB: u64 = 1024;
+/// Default slots allow one rustc per this much RAM (and per CPU).
+const RAM_PER_DEFAULT_SLOT: u64 = 2 * 1024 * 1024 * 1024;
 pub const DEFAULT_STORE_CAP_GB: f64 = 20.0;
 pub const DEFAULT_STORE_MAX_AGE_DAYS: f64 = 14.0;
 /// Below this share of free space on a store's volume, misses are not stored.
@@ -86,10 +91,18 @@ pub fn cargo_home() -> PathBuf {
         .unwrap_or_else(|| home_dir().join(".cargo"))
 }
 
+/// One slot per CPU, but no more than one per 2 GiB of RAM: a 16 GB laptop
+/// with 12 cores gets 8, an 8 GB one gets 4.
 pub fn default_slots() -> usize {
-    std::thread::available_parallelism()
+    let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
-        .unwrap_or(8)
+        .unwrap_or(8);
+    slots_for(cpus, crate::jobserver::memory_probe::total_bytes())
+}
+
+fn slots_for(cpus: usize, total_ram: Option<u64>) -> usize {
+    let by_ram = total_ram.map_or(usize::MAX, |b| (b / RAM_PER_DEFAULT_SLOT).max(1) as usize);
+    cpus.min(by_ram).max(1)
 }
 
 fn env_flag(name: &str) -> bool {
@@ -326,5 +339,15 @@ remotes = ["http://buildbox:7878"]
             s.workspace_cache_max_entry_mb,
             DEFAULT_WORKSPACE_CACHE_MAX_ENTRY_MB
         );
+    }
+
+    #[test]
+    fn default_slots_respect_ram() {
+        const GB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(slots_for(12, Some(16 * GB)), 8);
+        assert_eq!(slots_for(8, Some(8 * GB)), 4);
+        assert_eq!(slots_for(8, Some(64 * GB)), 8);
+        assert_eq!(slots_for(4, Some(GB)), 1);
+        assert_eq!(slots_for(6, None), 6);
     }
 }

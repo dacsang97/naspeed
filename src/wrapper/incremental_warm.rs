@@ -69,7 +69,7 @@ pub fn run(program: &Path, args: &[OsString]) -> i32 {
     // Low priority: never slow the build the user is waiting for.
     crate::platform::lower_priority();
     let settings = Settings::load();
-    let _slot = jobserver::acquire(&settings);
+    let permit = jobserver::acquire(&settings, args);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -83,7 +83,13 @@ pub fn run(program: &Path, args: &[OsString]) -> i32 {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .spawn()
+        .and_then(|mut child| {
+            permit.started(child.id());
+            let status = child.wait()?;
+            permit.finished(&child);
+            Ok(status)
+        });
     let _ = std::fs::remove_dir_all(&out_dir);
     match status {
         Ok(s) if s.success() => 0,

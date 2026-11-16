@@ -41,6 +41,34 @@ pub fn registered_targets(store: &Store) -> Vec<PathBuf> {
 
 /// One log line for a tree's size: logical bytes, and when the filesystem
 /// reports it, how much of that is unshared vs shared through clones.
+/// Memory admission state: what a new rustc could get, what running ones
+/// still hold in reserve, and the jobs that need the most.
+fn memory_lines(settings: &Settings) {
+    use crate::jobserver::{admission, memory_probe, peak_memory};
+    let _mem = crate::ui::indent();
+    let dir = settings.slots_dir();
+    let running = admission::live_reservations(&dir, settings.slots, None);
+    let reserved = admission::outstanding(&running, memory_probe::process_rss_bytes);
+    let available = memory_probe::available_bytes().map_or("unknown".to_owned(), human);
+    let total = memory_probe::total_bytes().map_or("unknown".to_owned(), human);
+    if memory_probe::under_pressure() {
+        crate::ui_warn!("memory pressure: new rustc wait until it clears or the running ones finish";
+            available = available, total = total);
+    } else {
+        crate::ui_info!("memory"; available = available, total = total,
+            admitted_rustc = running.len(), still_reserved = human(reserved));
+    }
+    let heavy = peak_memory::heaviest(&settings.config_dir, 3);
+    if !heavy.is_empty() {
+        let list = heavy
+            .iter()
+            .map(|(job, peak)| format!("{job}={}", human(*peak)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        crate::ui_info!("largest learned rustc peaks"; jobs = list);
+    }
+}
+
 fn usage_line(what: &str, u: &Usage) {
     match u.private {
         Some(p) => crate::ui_info!(what; files = u.files, logical = human(u.logical),
@@ -86,6 +114,7 @@ pub fn run(args: StatusArgs) -> Result<u8> {
     crate::ui_info!("rustc slots";
         in_use = format!("{}/{}", slot_pool::in_use(&settings.slots_dir(), settings.slots), settings.slots),
         min_free_memory = format!("{} MiB", settings.min_free_mem_mb));
+    memory_lines(&settings);
 
     for root in &settings.stores {
         if !root.is_dir() {

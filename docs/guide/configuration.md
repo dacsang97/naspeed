@@ -4,8 +4,8 @@ naspeed reads `~/.config/naspeed/config.toml`, which `setup` creates:
 
 ```toml
 stores = ["/Volumes/Work/.naspeed"]
-slots = 8
-min_free_mem_mb = 1536
+slots = 8           # default: CPUs, at most one per 2 GiB of RAM
+min_free_mem_mb = 1024  # kept free on top of running rustc reservations (0: no memory admission)
 store_cap_gb = 20
 store_max_age_days = 14
 min_free_disk_pct = 10   # below this share of free space on the store's volume, misses are not stored
@@ -28,7 +28,7 @@ These override the file:
 |---|---|
 | `NASPEED_STORE` | Use this store |
 | `NASPEED_SLOTS` | Number of slots |
-| `NASPEED_MIN_FREE_MEM_MB` | Memory threshold |
+| `NASPEED_MIN_FREE_MEM_MB` | Memory kept free on top of rustc reservations (0: memory admission off) |
 | `NASPEED_COW_MODE` | Copy mode |
 | `NASPEED_CONFIG_DIR` | Config directory |
 | `NASPEED_DISABLE=1` | Pass every call through |
