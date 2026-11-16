@@ -5,12 +5,14 @@
 //! batch.
 
 use super::log_bus::LogBus;
-use std::collections::BTreeSet;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
+use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -20,6 +22,7 @@ pub const DEBOUNCE: Duration = Duration::from_millis(150);
 /// Decides which changed paths matter. Paths are judged relative to the
 /// workspace root, so a workspace that itself lives under some `target/`
 /// directory (e.g. a test sandbox) still works.
+#[derive(Clone)]
 pub struct WatchFilter {
     /// The root as given plus its canonical form (FSEvents reports
     /// canonical paths such as `/private/var/...`).
@@ -99,12 +102,98 @@ impl WatchFilter {
     }
 }
 
+type FileMetadata = (u64, SystemTime);
+
+#[derive(Default)]
+struct FileSnapshot(BTreeMap<PathBuf, FileMetadata>);
+
+impl FileSnapshot {
+    fn build(root: &Path, filter: &WatchFilter) -> FileSnapshot {
+        let mut snapshot = FileSnapshot::default();
+        for dir in &filter.dirs {
+            snapshot.scan_dir(root, dir, filter);
+        }
+        for file in &filter.files {
+            snapshot.record(root, file, filter);
+        }
+        snapshot
+    }
+
+    fn scan_dir(&mut self, root: &Path, dir: &Path, filter: &WatchFilter) {
+        let abs = root.join(dir);
+        if !abs.is_dir() {
+            return;
+        }
+        let walk_filter = filter.clone();
+        let mut builder = WalkBuilder::new(&abs);
+        builder
+            .standard_filters(false)
+            .hidden(false)
+            .follow_links(false)
+            .filter_entry(move |entry| {
+                entry.depth() == 0 || walk_filter.relevant(entry.path()).is_some()
+            });
+        for entry in builder.build().filter_map(std::result::Result::ok) {
+            self.record(root, entry.path(), filter);
+        }
+    }
+
+    fn record(&mut self, root: &Path, path: &Path, filter: &WatchFilter) {
+        let abs = root.join(path);
+        let Some(rel) = filter.relevant(&abs) else {
+            return;
+        };
+        let Ok(metadata) = abs.symlink_metadata() else {
+            return;
+        };
+        if (metadata.file_type().is_file() || metadata.file_type().is_symlink())
+            && let Ok(modified) = metadata.modified()
+        {
+            self.0.insert(rel, (metadata.len(), modified));
+        }
+    }
+
+    fn changed_paths(&self, next: &FileSnapshot, root: &Path) -> BTreeSet<PathBuf> {
+        let modified = next
+            .0
+            .iter()
+            .filter(|(path, metadata)| self.0.get(*path) != Some(*metadata))
+            .map(|(path, _)| path);
+        let removed = self.0.keys().filter(|path| !next.0.contains_key(*path));
+        modified
+            .chain(removed)
+            .map(|path| root.join(path))
+            .collect()
+    }
+
+    fn refresh(&mut self, root: &Path, paths: &BTreeSet<PathBuf>, filter: &WatchFilter) {
+        for path in paths {
+            let Some(rel) = filter.relevant(path) else {
+                continue;
+            };
+            self.0
+                .retain(|known, _| known != &rel && !known.starts_with(&rel));
+            if path.is_dir() {
+                self.scan_dir(root, &rel, filter);
+            } else {
+                self.record(root, &rel, filter);
+            }
+        }
+    }
+}
+
+struct WatchState {
+    snapshot: FileSnapshot,
+    rescan_pending: bool,
+}
+
 /// Live watcher; dropping it stops watching.
 pub struct FileWatcher {
     _watcher: RecommendedWatcher,
     rx: Receiver<notify::Result<notify::Event>>,
     filter: WatchFilter,
     root: PathBuf,
+    state: RefCell<WatchState>,
     bus: LogBus,
 }
 
@@ -161,17 +250,23 @@ impl FileWatcher {
                 watched_paths.insert(abs_parent);
             }
         }
+        let snapshot = FileSnapshot::build(root, &filter);
         Ok(FileWatcher {
             _watcher: watcher,
             rx,
             filter,
             root: root.to_path_buf(),
+            state: RefCell::new(WatchState {
+                snapshot,
+                rescan_pending: false,
+            }),
             bus,
         })
     }
 
     /// Adds the relevant paths of one notify message to `into` (absolute,
-    /// under the root as given). Reads/opens are not changes.
+    /// under the root as given). Reads/opens are not changes. Returns whether
+    /// the message should extend the debounce window.
     fn absorb(&self, msg: notify::Result<notify::Event>, into: &mut BTreeSet<PathBuf>) -> bool {
         let event = match msg {
             Ok(event) => event,
@@ -183,6 +278,10 @@ impl FileWatcher {
         if matches!(event.kind, EventKind::Access(_)) {
             return false;
         }
+        if event.need_rescan() {
+            self.state.borrow_mut().rescan_pending = true;
+            return true;
+        }
         let mut added = false;
         for path in &event.paths {
             if let Some(rel) = self.filter.relevant(path) {
@@ -190,6 +289,24 @@ impl FileWatcher {
             }
         }
         added
+    }
+
+    fn finish_batch(&self, into: &mut BTreeSet<PathBuf>) {
+        let rescan_pending = {
+            let mut state = self.state.borrow_mut();
+            std::mem::take(&mut state.rescan_pending)
+        };
+        if rescan_pending {
+            let next = FileSnapshot::build(&self.root, &self.filter);
+            let mut state = self.state.borrow_mut();
+            into.extend(state.snapshot.changed_paths(&next, &self.root));
+            state.snapshot = next;
+        } else {
+            self.state
+                .borrow_mut()
+                .snapshot
+                .refresh(&self.root, into, &self.filter);
+        }
     }
 
     /// Records every change already queued, without waiting.
@@ -208,13 +325,13 @@ impl FileWatcher {
     }
 
     /// Keeps collecting into `into` until no relevant change arrived for
-    /// [`DEBOUNCE`].
+    /// [`DEBOUNCE`], then updates the filesystem snapshot.
     pub fn settle(&self, into: &mut BTreeSet<PathBuf>) -> Result<()> {
         let mut quiet_since = Instant::now();
         loop {
             let left = DEBOUNCE.saturating_sub(quiet_since.elapsed());
             if left.is_zero() {
-                return Ok(());
+                break;
             }
             match self.rx.recv_timeout(left) {
                 Ok(msg) => {
@@ -222,28 +339,36 @@ impl FileWatcher {
                         quiet_since = Instant::now();
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => return Ok(()),
-                Err(RecvTimeoutError::Disconnected) => return Err(anyhow!("file watcher stopped")),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(anyhow!("file watcher stopped"));
+                }
             }
         }
+        self.finish_batch(into);
+        Ok(())
     }
 
-    /// Waits up to `timeout` for a first relevant change, then debounces.
+    /// Waits up to `timeout` for a first relevant change or rescan, then
+    /// debounces and resolves the batch against the filesystem snapshot.
     /// Returns an empty set when nothing changed.
     pub fn next_batch(&self, timeout: Duration) -> Result<BTreeSet<PathBuf>> {
         let mut batch = BTreeSet::new();
         let deadline = Instant::now() + timeout;
-        while batch.is_empty() {
+        let mut active = self.state.borrow().rescan_pending;
+        while !active {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Ok(batch);
             }
             match self.rx.recv_timeout(left) {
                 Ok(msg) => {
-                    self.absorb(msg, &mut batch);
+                    active = self.absorb(msg, &mut batch);
                 }
                 Err(RecvTimeoutError::Timeout) => return Ok(batch),
-                Err(RecvTimeoutError::Disconnected) => return Err(anyhow!("file watcher stopped")),
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(anyhow!("file watcher stopped"));
+                }
             }
         }
         self.settle(&mut batch)?;
@@ -378,5 +503,116 @@ mod tests {
         std::fs::write(&env_file, "PORT=2\n").unwrap();
         let changes = watcher.next_batch(Duration::from_secs(3)).unwrap();
         assert_eq!(changes, [env_file].into_iter().collect());
+    }
+
+    fn synthetic_rescan(path: &Path) -> notify::Event {
+        use notify::event::Flag;
+
+        notify::Event::new(EventKind::Other)
+            .add_path(path.to_path_buf())
+            .set_flag(Flag::Rescan)
+    }
+
+    fn resolve_rescan(watcher: &FileWatcher, path: &Path) -> BTreeSet<PathBuf> {
+        let mut batch = BTreeSet::new();
+        assert!(watcher.absorb(Ok(synthetic_rescan(path)), &mut batch));
+        watcher.finish_batch(&mut batch);
+        batch
+    }
+
+    #[test]
+    fn rescan_with_no_change_is_an_empty_batch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("crates/a")).unwrap();
+        std::fs::write(root.join("crates/a/lib.rs"), "old").unwrap();
+        let (bus, _rx) = LogBus::channel();
+        let watcher =
+            FileWatcher::start(&root, &[PathBuf::from("crates")], filter(&root), bus).unwrap();
+
+        assert!(resolve_rescan(&watcher, &root.join("crates")).is_empty());
+    }
+
+    #[test]
+    fn rescan_reports_only_files_that_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let changed = root.join("crates/a/lib.rs");
+        let unchanged = root.join("crates/b/lib.rs");
+        std::fs::create_dir_all(changed.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(unchanged.parent().unwrap()).unwrap();
+        std::fs::write(&changed, "old").unwrap();
+        std::fs::write(&unchanged, "same").unwrap();
+        let (bus, _rx) = LogBus::channel();
+        let watcher =
+            FileWatcher::start(&root, &[PathBuf::from("crates")], filter(&root), bus).unwrap();
+
+        std::fs::write(&changed, "new and a different size").unwrap();
+
+        assert_eq!(
+            resolve_rescan(&watcher, &root.join("crates")),
+            [changed].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn rescan_sees_deleted_and_new_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let deleted = root.join("crates/a/deleted.rs");
+        let added = root.join("crates/a/added.rs");
+        std::fs::create_dir_all(deleted.parent().unwrap()).unwrap();
+        std::fs::write(&deleted, "old").unwrap();
+        let (bus, _rx) = LogBus::channel();
+        let watcher =
+            FileWatcher::start(&root, &[PathBuf::from("crates")], filter(&root), bus).unwrap();
+
+        std::fs::remove_file(&deleted).unwrap();
+        std::fs::write(&added, "new").unwrap();
+
+        assert_eq!(
+            resolve_rescan(&watcher, &root.join("crates")),
+            [added, deleted].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn rescan_ignores_target_and_gitignored_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("crates/a")).unwrap();
+        let (bus, _rx) = LogBus::channel();
+        let watcher =
+            FileWatcher::start(&root, &[PathBuf::from("crates")], filter(&root), bus).unwrap();
+
+        std::fs::create_dir_all(root.join("crates/a/target/tmp")).unwrap();
+        std::fs::write(root.join("crates/a/target/tmp/output"), "ignored").unwrap();
+        std::fs::create_dir_all(root.join("crates/a/generated")).unwrap();
+        std::fs::write(root.join("crates/a/generated/output.rs"), "ignored").unwrap();
+
+        assert!(resolve_rescan(&watcher, &root.join("crates")).is_empty());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn rescan_sees_replaced_watched_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("crates")).unwrap();
+        let first = root.join("one");
+        let second = root.join("a-much-longer-name");
+        let env = root.join(".env");
+        std::fs::write(&first, "first").unwrap();
+        std::fs::write(&second, "second").unwrap();
+        symlink(&first, &env).unwrap();
+        let (bus, _rx) = LogBus::channel();
+        let watcher =
+            FileWatcher::start(&root, &[PathBuf::from("crates")], filter(&root), bus).unwrap();
+
+        std::fs::remove_file(&env).unwrap();
+        symlink(&second, &env).unwrap();
+
+        assert_eq!(resolve_rescan(&watcher, &root), [env].into_iter().collect());
     }
 }
