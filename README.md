@@ -2,7 +2,7 @@
 
 A transparent `RUSTC_WRAPPER` for cargo. naspeed stores each compiled crate
 once per volume, in a content-addressed store, and clones it copy-on-write into
-every `target/` dir that needs it. A machine-wide slot pool also caps how many
+every `target/` dir that needs it. A machine-wide slot pool with memory admission also caps how many
 `rustc` run at once. No daemon, no server, no `-Z` flags. If naspeed is unsure
 about a call, or anything fails, it runs `rustc` unchanged.
 

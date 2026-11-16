@@ -268,10 +268,10 @@ impl Job<'_> {
 
     fn compile_and_store(&self, inv: &RustcInvocation) -> i32 {
         let started = SystemTime::now();
-        let permit = jobserver::acquire(self.settings);
+        let permit = jobserver::acquire(self.settings, self.args);
         debug!("rustc start");
         let rustc_started = Instant::now();
-        let output = run_teed(self.program, self.args);
+        let output = run_teed_permitted(self.program, self.args, &[], Some(&permit));
         let compile_ms = rustc_started.elapsed().as_millis() as u64;
         debug!("rustc end");
         drop(permit);
@@ -604,6 +604,17 @@ pub(crate) fn run_teed_env(
     args: &[OsString],
     envs: &[(OsString, OsString)],
 ) -> Result<TeedOutput> {
+    run_teed_permitted(program, args, envs, None)
+}
+
+/// `run_teed_env` for a rustc run under a permit, which learns the child's
+/// pid while it runs and its peak memory once it exits.
+pub(crate) fn run_teed_permitted(
+    program: &Path,
+    args: &[OsString],
+    envs: &[(OsString, OsString)],
+    permit: Option<&jobserver::RustcPermit>,
+) -> Result<TeedOutput> {
     let mut child = Command::new(program)
         .args(args)
         .envs(envs.iter().map(|(k, v)| (k, v)))
@@ -616,7 +627,13 @@ pub(crate) fn run_teed_env(
     let stderr = child.stderr.take().context("stderr")?;
     let out_thread = std::thread::spawn(move || tee(stdout, std::io::stdout()));
     let err_thread = std::thread::spawn(move || tee(stderr, std::io::stderr()));
+    if let Some(p) = permit {
+        p.started(child.id());
+    }
     let status = child.wait()?;
+    if let Some(p) = permit {
+        p.finished(&child);
+    }
     let stdout = out_thread.join().unwrap_or_default();
     let stderr = err_thread.join().unwrap_or_default();
     Ok(TeedOutput {

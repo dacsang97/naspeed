@@ -2,7 +2,7 @@
 
 | Command | What it does |
 |---|---|
-| `naspeed status` | Wrapper in effect, slot use, store entries, logical vs unshared bytes, 7-day hit rate, registered target dirs |
+| `naspeed status` | Wrapper in effect, slot use, available memory and pressure, largest learned rustc peaks, store entries, logical vs unshared bytes, 7-day hit rate, registered target dirs |
 | `naspeed status --check` | Also builds a tiny crate with `cargo build -v` and confirms naspeed wraps `rustc` |
 | `naspeed stats [--days N] [--json]` | Time saved: compile time of every rustc/build-script hit minus its restore time, test runs replayed by `ns test` and their run time, entries fetched from peers, and the crates that saved the most |
 | `naspeed gc [--max-size-gb N] [--max-age-days D]` | Evicts store entries least-recently-used first until the store is under the cap (default 20 GB), and drops entries unused for D days (default 14). Runs on its own in the background at most once a day; `NASPEED_NO_AUTO_GC=1` turns that off |

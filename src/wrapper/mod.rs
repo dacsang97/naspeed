@@ -16,7 +16,7 @@ use std::path::Path;
 use std::process::{Command, ExitStatus};
 
 use crate::config::Settings;
-use crate::jobserver;
+use crate::jobserver::{self, RustcPermit};
 
 pub type Env = BTreeMap<String, String>;
 
@@ -49,7 +49,26 @@ pub fn exit_code(status: ExitStatus) -> i32 {
 
 /// Run rustc untouched, inheriting stdio.
 pub fn passthrough(program: &Path, args: &[OsString]) -> i32 {
-    match Command::new(program).args(args).status() {
+    run_permitted(program, args, None)
+}
+
+/// `passthrough` under a permit: the permit learns the child's pid while it
+/// runs and its peak memory once it exits.
+pub fn run_permitted(program: &Path, args: &[OsString], permit: Option<&RustcPermit>) -> i32 {
+    let result = Command::new(program)
+        .args(args)
+        .spawn()
+        .and_then(|mut child| {
+            if let Some(p) = permit {
+                p.started(child.id());
+            }
+            let status = child.wait()?;
+            if let Some(p) = permit {
+                p.finished(&child);
+            }
+            Ok(status)
+        });
+    match result {
         Ok(status) => exit_code(status),
         Err(err) => {
             eprintln!("naspeed: failed to run {}: {err}", program.display());
@@ -68,9 +87,9 @@ pub fn run(argv: &[OsString]) -> i32 {
     match execute::run(&settings, program, args) {
         Some(code) => code,
         None => {
-            let _permit = jobserver::acquire(&settings);
+            let permit = jobserver::acquire(&settings, args);
             tracing::debug!("rustc start");
-            let code = passthrough(program, args);
+            let code = run_permitted(program, args, Some(&permit));
             tracing::debug!("rustc end");
             code
         }

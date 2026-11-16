@@ -266,6 +266,21 @@ mod tests {
         .unwrap()
     }
 
+    /// Swallow events for changes made before the watcher started. FSEvents
+    /// can deliver those (e.g. the creation of the watched dirs) a moment
+    /// after start, where they would land in the batch under test.
+    fn drain_startup_events(watcher: &FileWatcher) {
+        for _ in 0..10 {
+            if watcher
+                .next_batch(Duration::from_millis(300))
+                .unwrap()
+                .is_empty()
+            {
+                return;
+            }
+        }
+    }
+
     #[test]
     fn filters_by_location_and_ignore_rules() {
         let tmp = tempfile::tempdir().unwrap();
@@ -358,7 +373,7 @@ mod tests {
         .unwrap();
         let (bus, _rx) = LogBus::channel();
         let watcher = FileWatcher::start(&root, &[PathBuf::from("crates")], filter, bus).unwrap();
-        std::thread::sleep(Duration::from_millis(300));
+        drain_startup_events(&watcher);
 
         std::fs::write(&env_file, "PORT=2\n").unwrap();
         let changes = watcher.next_batch(Duration::from_secs(3)).unwrap();
