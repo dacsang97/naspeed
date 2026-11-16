@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/dacsang97/naspeed/compare/v0.9.0...v0.10.0) - 2026-11-16
+
+### Added
+
+- *(jobserver)* admit rustc by learned peak memory ([#31](https://github.com/dacsang97/naspeed/pull/31))
+
 ## [0.9.0](https://github.com/dacsang97/naspeed/compare/v0.8.0...v0.9.0) - 2026-11-15
 
 ### Added
