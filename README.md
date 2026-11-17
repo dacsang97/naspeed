@@ -1,10 +1,16 @@
 # naspeed
 
+**Fast builds. Simple dev loops.**
+
 A transparent `RUSTC_WRAPPER` for cargo. naspeed stores each compiled crate
 once per volume, in a content-addressed store, and clones it copy-on-write into
 every `target/` dir that needs it. A machine-wide slot pool with memory admission also caps how many
 `rustc` run at once. No daemon, no server, no `-Z` flags. If naspeed is unsure
 about a call, or anything fails, it runs `rustc` unchanged.
+
+The `ns` project front-end adds selective development loops for Cargo
+workspaces, Go modules, and `go.work`: it rebuilds and restarts only affected
+applications while failed builds leave the previous processes serving.
 
 Repository: <https://github.com/dacsang97/naspeed>
 Docs: <https://dacsang97.github.io/naspeed/>
