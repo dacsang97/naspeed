@@ -78,17 +78,18 @@ pub fn test_scope(graph: &WorkspaceGraph, paths: &BTreeSet<PathBuf>) -> Scope {
     }
 }
 
-/// A background `cargo test` whose combined output is shown only on failure.
+/// A background Cargo or Go test run whose output is shown on failure.
 pub struct TestRun {
     child: GroupChild,
     output: Arc<Mutex<String>>,
     readers: Vec<JoinHandle<()>>,
     started: Instant,
-    scope: Scope,
+    scope: String,
+    go_json: bool,
     bus: super::log_bus::LogBus,
     /// Changes this run covers; handed back when it is cancelled.
     pub paths: BTreeSet<PathBuf>,
-    /// Test-cache plan the runner reads; removed when the run is dropped.
+    /// Test-cache plan the Cargo runner reads; removed when the run is dropped.
     _plan: Option<crate::testcache::PlanFile>,
 }
 
@@ -104,69 +105,120 @@ impl TestRun {
         paths: BTreeSet<PathBuf>,
         bus: super::log_bus::LogBus,
     ) -> Result<TestRun> {
+        let description = scope.describe();
         // Through the test cache (unchanged packages replay their last
         // pass) unless the workspace cannot be loaded or opts out.
-        let (mut cmd, plan) = match crate::project::Project::load(root)
-            .and_then(|p| crate::testcache::cargo_test_command(&p, false, &[]))
+        let (mut command, plan) = match crate::project::Project::load(root)
+            .and_then(|project| crate::testcache::cargo_test_command(&project, false, &[]))
         {
             Ok(pair) => pair,
             Err(_) => {
-                let mut cmd = cargo_command();
-                cmd.arg("test");
-                (cmd, None)
+                let mut command = cargo_command();
+                command.arg("test");
+                (command, None)
             }
         };
-        cmd.args(scope.cargo_args())
-            .current_dir(root)
+        command.args(scope.cargo_args()).current_dir(root);
+        Self::spawn(command, description, false, paths, bus, plan)
+    }
+
+    pub fn start_go(
+        root: &Path,
+        packages: BTreeSet<String>,
+        paths: BTreeSet<PathBuf>,
+        bus: super::log_bus::LogBus,
+    ) -> Result<TestRun> {
+        let description = packages.iter().cloned().collect::<Vec<_>>().join(", ");
+        let command = super::go_test_runner::command(root, &packages);
+        Self::spawn(command, description, true, paths, bus, None)
+    }
+
+    fn spawn(
+        mut command: std::process::Command,
+        scope: String,
+        go_json: bool,
+        paths: BTreeSet<PathBuf>,
+        bus: super::log_bus::LogBus,
+        plan: Option<crate::testcache::PlanFile>,
+    ) -> Result<TestRun> {
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = GroupChild::spawn(cmd)?;
+        let mut child = GroupChild::spawn(command)?;
         let output = Arc::new(Mutex::new(String::new()));
         let mut readers = Vec::new();
-        let stdout = child
-            .child_mut()
-            .stdout
-            .take()
-            .context("cargo test stdout")?;
-        let stderr = child
-            .child_mut()
-            .stderr
-            .take()
-            .context("cargo test stderr")?;
+        let stdout = child.child_mut().stdout.take().context("test stdout")?;
+        let stderr = child.child_mut().stderr.take().context("test stderr")?;
         readers.push(collect(stdout, output.clone()));
         readers.push(collect(stderr, output.clone()));
-        status_line::info(&bus, format!("testing {}", scope.describe()));
+        status_line::info(&bus, format!("testing {scope}"));
         Ok(TestRun {
             child,
             output,
             readers,
             started: Instant::now(),
             scope,
+            go_json,
             bus,
             paths,
             _plan: plan,
         })
     }
 
-    /// Reports and returns the result once `cargo test` has finished.
+    /// Reports and returns the result once the test process has finished.
     pub fn poll(&mut self) -> Result<Option<TestResult>> {
         let Some(status) = self.child.try_wait()? else {
             return Ok(None);
         };
         self.child.stop(STOP_GRACE);
-        for r in self.readers.drain(..) {
-            let _ = r.join();
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
         }
         let elapsed = status_line::ms(self.started.elapsed());
+        let output = self
+            .output
+            .lock()
+            .map(|output| output.clone())
+            .unwrap_or_default();
+        if self.go_json {
+            let summary = super::go_test_runner::summarize(&output);
+            if status.success() {
+                status_line::ok(
+                    &self.bus,
+                    format!(
+                        "tests passed ({} passed, {} skipped; {}) in {elapsed}",
+                        summary.passed, summary.skipped, self.scope
+                    ),
+                );
+                return Ok(Some(TestResult::Passed));
+            }
+            let failure = if summary.failures.is_empty() {
+                super::go_test_runner::readable_output(&output)
+            } else {
+                summary.failures.join("\n")
+            };
+            self.bus.log(
+                super::log_bus::LogSource::Test,
+                super::log_bus::Stream::Stderr,
+                failure,
+            );
+            status_line::error(
+                &self.bus,
+                format!(
+                    "tests failed ({} failed, {} passed; {}) in {elapsed}",
+                    summary.failed, summary.passed, self.scope
+                ),
+            );
+            return Ok(Some(TestResult::Failed));
+        }
         if status.success() {
             status_line::ok(
                 &self.bus,
-                format!("tests passed ({}) in {elapsed}", self.scope.describe()),
+                format!("tests passed ({}) in {elapsed}", self.scope),
             );
             return Ok(Some(TestResult::Passed));
         }
-        let output = self.output.lock().map(|o| o.clone()).unwrap_or_default();
         let lines: Vec<&str> = output.lines().collect();
         let tail = &lines[lines.len().saturating_sub(40)..];
         self.bus.log(
@@ -176,7 +228,7 @@ impl TestRun {
         );
         status_line::error(
             &self.bus,
-            format!("tests failed ({}) in {elapsed}", self.scope.describe()),
+            format!("tests failed ({}) in {elapsed}", self.scope),
         );
         Ok(Some(TestResult::Failed))
     }

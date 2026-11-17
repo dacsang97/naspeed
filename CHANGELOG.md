@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(dev)* watch, build, selectively restart and test Go modules and `go.work` workspaces
+
 ### Fixed
 
 - *(dev)* preserve mouse text selection while wheel-scrolling beyond the TUI viewport
@@ -16,10 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - *(dev)* handle dropped file events without restarts ([#33](https://github.com/dacsang97/naspeed/pull/33))
-### Fixed
-
-- *(dev)* avoid spurious app restarts when macOS drops file events during target sweeps or large builds
-
 
 ## [0.10.0](https://github.com/dacsang97/naspeed/compare/v0.9.0...v0.10.0) - 2026-11-16
 

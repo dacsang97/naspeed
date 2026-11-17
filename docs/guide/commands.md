@@ -18,4 +18,6 @@ Every `gc` mode takes `--dry-run`, and `--exclude <dir>` (repeatable) to leave
 a project you are actively developing alone.
 
 The project-level commands (`ns dev`, `ns test`, `ns release`, `ns image`,
-`ns ci init`, `ns cache …`) are described in [ns front-end](./ns).
+`ns ci init`, `ns cache …`) are described in [ns front-end](./ns). `ns dev`
+also supports Go modules and `go.work`; the other project commands remain
+Cargo-only.

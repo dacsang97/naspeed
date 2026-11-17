@@ -13,7 +13,7 @@ use super::file_watcher::{FileWatcher, WatchFilter};
 use super::log_bus::LogBus;
 use super::process_supervisor::shutdown_requested;
 use super::status_line;
-use crate::project::{Project, WorkspaceGraph};
+use super::toolchain::DevToolchain;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -22,8 +22,8 @@ pub(super) enum UiCommand {
     Quit,
 }
 
-pub(super) struct DevLoop<'a> {
-    pub(super) graph: &'a WorkspaceGraph,
+pub(super) struct DevLoop {
+    pub(super) toolchain: DevToolchain,
     pub(super) settings: Settings,
     pub(super) watcher: FileWatcher,
     pub(super) apps: BTreeMap<String, AppSlot>,
@@ -32,24 +32,28 @@ pub(super) struct DevLoop<'a> {
     pub(super) manual_restarts: BTreeSet<String>,
     /// Rust changes not yet covered by a started test run.
     pub(super) untested: BTreeSet<PathBuf>,
+    pub(super) go_watcher_stale: bool,
     pub(super) bus: LogBus,
 }
 
 pub fn run_loop(
-    project: Project,
+    toolchain: DevToolchain,
     settings: Settings,
     bus: LogBus,
     ui_rx: Option<Receiver<UiCommand>>,
     colorize: bool,
 ) -> Result<u8> {
-    let filter = WatchFilter::new(
+    let filter = WatchFilter::new_with_skips(
         &settings.root,
         &settings.watch_dirs,
         &settings.watch_files,
         &settings.ignore,
+        &settings.skipped_dirs,
     )?;
     let watcher = FileWatcher::start(&settings.root, &settings.watch_dirs, filter, bus.clone())?;
-    let target_gc = super::target_gc::spawn(project.graph.target_dir.clone(), bus.clone());
+    let target_gc = toolchain
+        .target_dir()
+        .map(|target_dir| super::target_gc::spawn(target_dir, bus.clone()));
     let bins = settings
         .apps
         .iter()
@@ -60,6 +64,9 @@ pub fn run_loop(
         &bus,
         format!("watching {} for {bins}", settings.root.display()),
     );
+    for warning in &settings.warnings {
+        status_line::warn(&bus, warning);
+    }
     let apps = settings
         .apps
         .iter()
@@ -70,13 +77,14 @@ pub fn run_loop(
         })
         .collect();
     let mut dev = DevLoop {
-        graph: &project.graph,
+        toolchain,
         settings,
         watcher,
         apps,
         tests: None,
         ui_rx,
         manual_restarts: BTreeSet::new(),
+        go_watcher_stale: false,
         untested: BTreeSet::new(),
         bus,
     };
@@ -94,13 +102,13 @@ pub fn run_loop(
         dev.run_pending(batch)?;
     }
     dev.shutdown();
-    if let Some(target_gc) = target_gc {
+    if let Some(Some(target_gc)) = target_gc {
         let _ = target_gc.join();
     }
     Ok(0)
 }
 
-impl DevLoop<'_> {
+impl DevLoop {
     fn run_pending(&mut self, mut pending: BTreeSet<PathBuf>) -> Result<()> {
         while !pending.is_empty() && !shutdown_requested() {
             let changes = std::mem::take(&mut pending);
@@ -112,6 +120,41 @@ impl DevLoop<'_> {
         }
         self.process_ui_commands();
         self.restart_manual()?;
+        Ok(())
+    }
+
+    pub(super) fn refresh_go_watcher(
+        &mut self,
+        old_go_files: &[PathBuf],
+        pending: &mut BTreeSet<PathBuf>,
+    ) -> Result<()> {
+        let graph = self.toolchain.go_graph().expect("Go graph");
+        self.settings
+            .watch_files
+            .retain(|path| !old_go_files.contains(path));
+        for path in graph.watch_files() {
+            if !self.settings.watch_files.contains(&path) {
+                self.settings.watch_files.push(path);
+            }
+        }
+        if self.settings.go_auto_watch {
+            self.settings.watch_dirs = graph.watch_dirs();
+        }
+        let filter = WatchFilter::new_with_skips(
+            &self.settings.root,
+            &self.settings.watch_dirs,
+            &self.settings.watch_files,
+            &self.settings.ignore,
+            &self.settings.skipped_dirs,
+        )?;
+        let watcher = FileWatcher::start(
+            &self.settings.root,
+            &self.settings.watch_dirs,
+            filter,
+            self.bus.clone(),
+        )?;
+        self.watcher.drain(pending)?;
+        self.watcher = watcher;
         Ok(())
     }
 }

@@ -35,7 +35,7 @@ cache; `ns` is its project front-end. Docs: https://dacsang97.github.io/naspeed/
   - `ns check` runs rustfmt --check and clippy -D warnings on every target;
   - `ns test` runs `cargo test` and replays test binaries unchanged since they
     last passed (`ns test --no-cache` forces a full run);
-  - `ns dev` runs the app and rebuilds it on change (settings in `ns.toml`).
+  - `ns dev` runs Cargo or Go apps and rebuilds them on change (settings in `ns.toml`).
 - Before finishing a task, run `ns check` and `ns test`, and fix what they report.
 <!-- naspeed:end -->
 ```
@@ -66,7 +66,8 @@ unrelated changes.
    anything unrelated to caching.
 3. If the project runs a server or CLI during development, add an `ns.toml`
    with a `[dev]` section (`bin`, `env_file`, `ports` the process listens
-   on) so `ns dev` can rebuild and restart it.
+   on) so `ns dev` can rebuild and restart it. Go projects can use `ns dev`;
+   `ns fmt`, `ns check`, `ns test`, release, image and CI commands remain Cargo-only.
 4. Point the project's own entry points at `ns`, with a plain cargo
    fallback for machines without naspeed, e.g. in a Makefile:
    `NS := $(shell command -v ns 2>/dev/null)`, then

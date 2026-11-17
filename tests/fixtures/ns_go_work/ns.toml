@@ -1,0 +1,11 @@
+[dev]
+bins = ["api", "tool"]
+test = true
+
+[dev.apps.api]
+args = ["--port", "19082"]
+ports = [19082]
+
+[dev.apps.tool]
+args = ["--port", "19083"]
+ports = [19083]

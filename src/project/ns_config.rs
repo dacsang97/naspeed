@@ -19,6 +19,13 @@ pub struct NsConfig {
     pub test: TestConfig,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DevToolchainName {
+    Cargo,
+    Go,
+}
+
 /// `[test]`: the `ns test` result cache.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -53,6 +60,8 @@ impl Default for TestConfig {
 #[derive(Debug, Default, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DevConfig {
+    /// Build tool used by `ns dev`; required when Cargo and Go markers coexist.
+    pub toolchain: Option<DevToolchainName>,
     /// Legacy single binary; mutually exclusive with `bins`.
     pub bin: Option<String>,
     /// Binaries to supervise; defaults to the only workspace binary.
@@ -77,6 +86,8 @@ pub struct DevConfig {
 #[derive(Debug, Default, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
+    /// Go main package import path; disambiguates duplicate binary names.
+    pub package: Option<String>,
     pub args: Option<Vec<String>>,
     pub env_file: Option<PathBuf>,
     pub ports: Option<Vec<u16>>,
@@ -362,6 +373,7 @@ mod tests {
 
     const FULL: &str = r#"
 [dev]
+toolchain = "go"
 bin = "api"
 args = ["--port", "8080"]
 env_file = ".env"
@@ -369,6 +381,9 @@ watch = ["crates", "apps"]
 ignore = ["**/*.md"]
 ports = [8080]
 test = true
+
+[dev.apps.api]
+package = "example.test/service/cmd/api"
 
 [release]
 bins = ["api"]
@@ -387,9 +402,14 @@ entrypoint = ["/api"]
     #[test]
     fn parses_full_file() {
         let cfg = NsConfig::parse(FULL).unwrap();
+        assert_eq!(cfg.dev.toolchain, Some(DevToolchainName::Go));
         assert_eq!(cfg.dev.bin.as_deref(), Some("api"));
         assert_eq!(cfg.dev.ports, vec![8080]);
         assert!(cfg.dev.test);
+        assert_eq!(
+            cfg.dev.apps["api"].package.as_deref(),
+            Some("example.test/service/cmd/api")
+        );
         assert_eq!(cfg.release.targets.len(), 2);
         assert_eq!(cfg.release.archive.files.len(), 2);
         assert_eq!(cfg.release.sign, SignMode::Cosign);

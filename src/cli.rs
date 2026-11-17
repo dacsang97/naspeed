@@ -59,7 +59,7 @@ pub fn is_naspeed_invocation(first: &OsString) -> bool {
 #[command(
     name = "naspeed",
     version,
-    about = "Transparent Rust build cache: registry crates stored once per volume and cloned copy-on-write into every target/"
+    about = "Rust build cache and project tooling, including Cargo/Go development loops"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -71,7 +71,7 @@ pub struct Cli {
 #[command(
     name = "ns",
     version,
-    about = "Rust project front-end over cargo: dev loop, release, OCI images, CI cache (alias of naspeed)"
+    about = "Project front-end: Cargo build tooling and Cargo/Go development loops (alias of naspeed)"
 )]
 pub struct NsCli {
     #[command(subcommand)]
@@ -92,7 +92,7 @@ pub enum Command {
     Build(BuildArgs),
     /// Remove artifacts naspeed placed into a target dir.
     Purge(PurgeArgs),
-    /// Watch the workspace: check → build → restart the binary on every change.
+    /// Watch a Cargo or Go project: build, test, and selectively restart binaries on change.
     Dev(crate::dev::DevArgs),
     /// Build the release target matrix, archive, checksum, sign and publish.
     Release(crate::release::ReleaseArgs),
@@ -263,16 +263,37 @@ pub fn run(args: Vec<OsString>) -> Result<u8> {
         Command::Uninstall(a) => commands::uninstall::run(a),
         Command::Status(a) => commands::status::run(a),
         Command::Gc(a) => commands::gc::run(a),
-        Command::Build(a) => commands::build::run(a),
+        Command::Build(a) => {
+            reject_go_only("ns build")?;
+            commands::build::run(a)
+        }
         Command::Purge(a) => commands::purge::run(a),
         Command::Dev(a) => crate::dev::run(a),
-        Command::Release(a) => crate::release::run(a),
-        Command::Image(a) => crate::image::run(a),
-        Command::Ci(c) => crate::ci::run(c),
+        Command::Release(a) => {
+            reject_go_only("ns release")?;
+            crate::release::run(a)
+        }
+        Command::Image(a) => {
+            reject_go_only("ns image")?;
+            crate::image::run(a)
+        }
+        Command::Ci(c) => {
+            reject_go_only("ns ci")?;
+            crate::ci::run(c)
+        }
         Command::Cache(c) => commands::cache_transfer::run(c),
-        Command::Test(a) => crate::testcache::run(a),
-        Command::Check(a) => commands::check::run(a),
-        Command::Fmt(a) => commands::check::run_fmt(a),
+        Command::Test(a) => {
+            reject_go_only("ns test")?;
+            crate::testcache::run(a)
+        }
+        Command::Check(a) => {
+            reject_go_only("ns check")?;
+            commands::check::run(a)
+        }
+        Command::Fmt(a) => {
+            reject_go_only("ns fmt")?;
+            commands::check::run_fmt(a)
+        }
         Command::Stats(a) => commands::stats::run(a),
         Command::WarmIncremental(a) => {
             Ok(crate::wrapper::incremental_warm::run(&a.program, &a.args).clamp(0, 255) as u8)
@@ -292,6 +313,16 @@ pub fn run(args: Vec<OsString>) -> Result<u8> {
             Ok(0)
         }
     }
+}
+
+fn reject_go_only(command: &str) -> Result<()> {
+    let current = std::env::current_dir()?;
+    if crate::dev::toolchain::is_go_only_dir(&current) {
+        anyhow::bail!(
+            "Go projects are supported by `ns dev` only for now; {command} requires a Cargo project"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

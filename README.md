@@ -49,7 +49,7 @@ Everything else lives in the [docs site](https://dacsang97.github.io/naspeed/)
 - [Commands](https://dacsang97.github.io/naspeed/guide/commands) —
   `status`, `stats`, `gc`, `purge`, `build`
 - [ns front-end](https://dacsang97.github.io/naspeed/guide/ns) —
-  `ns dev`, `ns test`, `ns check`, `ns fmt`, `ns release`, `ns image`, `ns ci init`, `ns.toml`
+  Cargo and Go `ns dev`; Cargo-only `ns test`, `ns check`, `ns fmt`, `ns release`, `ns image`, and `ns ci init`
 - [Test result cache](https://dacsang97.github.io/naspeed/guide/test-cache) and
   [Peer cache over Tailscale](https://dacsang97.github.io/naspeed/guide/peer-cache)
 - [GitHub Actions](https://dacsang97.github.io/naspeed/guide/github-actions) —
