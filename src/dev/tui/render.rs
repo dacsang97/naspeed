@@ -32,6 +32,7 @@ pub(super) struct ScreenMap {
     /// The log area as last painted: what a new selection starts from.
     painted: Option<Buffer>,
     pub(super) selection: Option<TextSelection>,
+    selection_needs_refresh: bool,
     /// Row of the tab bar and each tab's columns `[start, end)`.
     tab_row: u16,
     tab_spans: Vec<(u16, u16)>,
@@ -58,22 +59,47 @@ impl ScreenMap {
             .position(|(start, end)| (*start..*end).contains(&position.x))
     }
 
+    fn row_info(&self) -> Vec<Option<RowInfo>> {
+        self.rows
+            .iter()
+            .map(|slot| {
+                slot.map(|slot| RowInfo {
+                    id: slot.id,
+                    offset: slot.offset,
+                    continues: slot.offset > 0,
+                    indent: slot.indent,
+                })
+            })
+            .collect()
+    }
+
     /// Start a selection on the log area as last painted.
     pub(super) fn start_selection(&mut self, at: Position) {
         let Some(painted) = self.painted.clone() else {
             return;
         };
-        let rows = self
-            .rows
-            .iter()
-            .map(|slot| {
-                slot.map(|slot| RowInfo {
-                    continues: slot.offset > 0,
-                    indent: slot.indent,
-                })
-            })
-            .collect();
-        self.selection = Some(TextSelection::start(painted, rows, at));
+        self.selection = TextSelection::start(painted, self.row_info(), at);
+        self.selection_needs_refresh = false;
+    }
+
+    /// Keep an active drag while the viewport moves. Completed selections
+    /// retain the existing behavior where a wheel event dismisses them.
+    pub(super) fn prepare_selection_scroll(&mut self) -> bool {
+        if self.selection.as_ref().is_some_and(TextSelection::dragging) {
+            self.selection_needs_refresh = true;
+            true
+        } else {
+            self.selection = None;
+            false
+        }
+    }
+
+    fn refresh_selection(&mut self) {
+        let rows = self.row_info();
+        if let (Some(selection), Some(painted)) = (&mut self.selection, self.painted.clone()) {
+            selection.update_viewport(painted, rows);
+        }
+        self.selection_needs_refresh = false;
     }
 
     fn height(&mut self, id: u64, plain: &str, prefix: &str, width: u16) -> u16 {
@@ -135,18 +161,24 @@ pub(super) fn render(frame: &mut Frame<'_>, state: &mut TuiState, screen: &mut S
     ])
     .split(frame.area());
     render_header(frame, state, screen, areas[0]);
-    // A selection holds the frame it started on until it is dropped; a
-    // resize invalidates it.
+    // A selection holds its last viewport until an active drag requests a
+    // wheel scroll. A resize invalidates the logical row coordinates.
     if screen
         .selection
         .as_ref()
         .is_some_and(|selection| selection.area() != areas[1])
     {
         screen.selection = None;
+        screen.selection_needs_refresh = false;
     }
-    match &screen.selection {
-        Some(selection) => selection.paint(frame.buffer_mut()),
-        None => render_logs(frame, state, screen, areas[1]),
+    if screen.selection.is_some() && screen.selection_needs_refresh {
+        render_logs(frame, state, screen, areas[1]);
+        screen.refresh_selection();
+    } else if screen.selection.is_none() {
+        render_logs(frame, state, screen, areas[1]);
+    }
+    if let Some(selection) = &screen.selection {
+        selection.paint(frame.buffer_mut());
     }
     render_composer(frame, state, screen.visible_count, areas[2]);
     let footer = if state.show_shortcuts {
