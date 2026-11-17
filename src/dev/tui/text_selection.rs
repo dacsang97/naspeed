@@ -1,10 +1,11 @@
 //! Mouse text selection over the log area, as in a terminal: press, drag,
-//! release copies. A selection holds the log area as it was painted when
-//! the button went down, so lines arriving meanwhile never move the text
-//! under the mouse; it is dropped on the next key, click or scroll.
+//! release copies. A selection holds the last painted viewport, while rows
+//! visited by wheel scrolling are retained by logical log-line position.
+
+use std::collections::BTreeMap;
 
 use ratatui::{
-    buffer::Buffer,
+    buffer::{Buffer, Cell},
     layout::{Position, Rect},
     style::Modifier,
     text::Span,
@@ -13,32 +14,65 @@ use ratatui::{
 /// How a painted log row relates to its log line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct RowInfo {
+    pub(super) id: u64,
+    pub(super) offset: u16,
     /// The row continues the line wrapped from the row above.
     pub(super) continues: bool,
     /// Columns of `[source] ` tag (or its indent) before the text.
     pub(super) indent: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RowKey {
+    id: u64,
+    offset: u16,
+}
+
+impl From<RowInfo> for RowKey {
+    fn from(row: RowInfo) -> Self {
+        Self {
+            id: row.id,
+            offset: row.offset,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SelectionPoint {
+    row: RowKey,
+    x: u16,
+}
+
+struct CapturedRow {
+    info: RowInfo,
+    cells: Vec<Cell>,
+}
+
 pub(super) struct TextSelection {
     frame: Buffer,
     rows: Vec<Option<RowInfo>>,
-    anchor: Position,
-    head: Position,
+    captured: BTreeMap<RowKey, CapturedRow>,
+    anchor: SelectionPoint,
+    head: SelectionPoint,
     dragging: bool,
 }
 
 impl TextSelection {
-    /// Start at `at` on `frame`, the painted log area, whose rows `rows`
-    /// describe top to bottom.
-    pub(super) fn start(frame: Buffer, rows: Vec<Option<RowInfo>>, at: Position) -> Self {
+    /// Start at `at` on `frame`, using the nearest painted log row when the
+    /// pointer is in blank space below short output.
+    pub(super) fn start(frame: Buffer, rows: Vec<Option<RowInfo>>, at: Position) -> Option<Self> {
         let at = clamp(frame.area, at);
-        Self {
+        let anchor = point_at(frame.area, &rows, at)?;
+        let mut selection = Self {
             frame,
             rows,
-            anchor: at,
-            head: at,
+            captured: BTreeMap::new(),
+            anchor,
+            head: anchor,
             dragging: true,
-        }
+        };
+        selection.capture_rows();
+        Some(selection)
     }
 
     pub(super) fn area(&self) -> Rect {
@@ -49,9 +83,21 @@ impl TextSelection {
         self.dragging
     }
 
-    /// Move the free end; a drag past the log area stops at its edge.
+    /// Move the free end; a drag past the log area stops at its nearest row.
     pub(super) fn drag_to(&mut self, at: Position) {
-        self.head = clamp(self.frame.area, at);
+        let at = clamp(self.frame.area, at);
+        if let Some(head) = point_at(self.frame.area, &self.rows, at) {
+            self.head = head;
+        }
+    }
+
+    /// Replace the held viewport after wheel scrolling and retain its rows for
+    /// copying a selection that spans more than one viewport.
+    pub(super) fn update_viewport(&mut self, frame: Buffer, rows: Vec<Option<RowInfo>>) {
+        debug_assert_eq!(self.frame.area, frame.area);
+        self.frame = frame;
+        self.rows = rows;
+        self.capture_rows();
     }
 
     /// Release the button. `None` for a click (no text selected).
@@ -81,26 +127,37 @@ impl TextSelection {
         }
         let (start, end) = self.bounds();
         let area = self.frame.area;
+        let mut selected = self.captured.range(start.row..=end.row).peekable();
         let mut text = String::new();
-        for y in start.y..=end.y {
-            let info = self.row(y);
-            let mut x0 = if y == start.y { start.x } else { area.x };
-            if info.is_some_and(|info| info.continues) {
-                x0 = x0.max(area.x + info.map_or(0, |info| info.indent));
+        while let Some((key, row)) = selected.next() {
+            let mut x0 = if *key == start.row { start.x } else { area.x };
+            if row.info.continues {
+                x0 = x0.max(area.x + row.info.indent);
             }
-            let x1 = if y == end.y { end.x } else { area.right() - 1 };
+            let x1 = if *key == end.row {
+                end.x
+            } else {
+                area.right() - 1
+            };
             let row_start = text.len();
             let mut x = x0;
             while x <= x1 {
-                let symbol = self.frame[(x, y)].symbol();
+                let Some(cell) = row.cells.get(usize::from(x - area.x)) else {
+                    break;
+                };
+                let symbol = cell.symbol();
                 text.push_str(symbol);
                 x += (Span::raw(symbol).width() as u16).max(1);
             }
-            let wraps_on = y < end.y && self.row(y + 1).is_some_and(|next| next.continues);
+            let wraps_on = selected.peek().is_some_and(|(_, next)| {
+                next.info.id == row.info.id
+                    && next.info.offset == row.info.offset.saturating_add(1)
+                    && next.info.continues
+            });
             if !wraps_on {
                 let kept = text[row_start..].trim_end().len();
                 text.truncate(row_start + kept);
-                if y < end.y {
+                if selected.peek().is_some() {
                     text.push('\n');
                 }
             }
@@ -108,17 +165,26 @@ impl TextSelection {
         text
     }
 
-    fn row(&self, y: u16) -> Option<RowInfo> {
-        self.rows
-            .get(usize::from(y - self.frame.area.y))
-            .copied()
-            .flatten()
+    fn capture_rows(&mut self) {
+        let area = self.frame.area;
+        for (index, info) in self.rows.iter().copied().enumerate() {
+            let Some(info) = info else {
+                continue;
+            };
+            let key = RowKey::from(info);
+            self.captured.entry(key).or_insert_with(|| {
+                let y = area.y + index as u16;
+                let cells = (area.x..area.right())
+                    .map(|x| self.frame[(x, y)].clone())
+                    .collect();
+                CapturedRow { info, cells }
+            });
+        }
     }
 
     /// The ends in reading order; the later end is the last selected cell.
-    fn bounds(&self) -> (Position, Position) {
-        let key = |p: Position| (p.y, p.x);
-        if key(self.anchor) <= key(self.head) {
+    fn bounds(&self) -> (SelectionPoint, SelectionPoint) {
+        if self.anchor <= self.head {
             (self.anchor, self.head)
         } else {
             (self.head, self.anchor)
@@ -129,10 +195,29 @@ impl TextSelection {
         if self.anchor == self.head {
             return false;
         }
+        let Some(point) = point_at(self.frame.area, &self.rows, position) else {
+            return false;
+        };
         let (start, end) = self.bounds();
-        let key = |p: Position| (p.y, p.x);
-        key(start) <= key(position) && key(position) <= key(end)
+        start <= point && point <= end
     }
+}
+
+fn point_at(area: Rect, rows: &[Option<RowInfo>], at: Position) -> Option<SelectionPoint> {
+    let index = usize::from(at.y.saturating_sub(area.y));
+    let info = rows.get(index).copied().flatten().or_else(|| {
+        rows[..index.min(rows.len())]
+            .iter()
+            .rev()
+            .copied()
+            .flatten()
+            .next()
+            .or_else(|| rows.iter().skip(index).copied().flatten().next())
+    })?;
+    Some(SelectionPoint {
+        row: RowKey::from(info),
+        x: at.x,
+    })
 }
 
 fn clamp(area: Rect, at: Position) -> Position {
@@ -155,22 +240,23 @@ mod tests {
         buffer
     }
 
-    const LINE: Option<RowInfo> = Some(RowInfo {
-        continues: false,
-        indent: 6,
-    });
-    const WRAP: Option<RowInfo> = Some(RowInfo {
-        continues: true,
-        indent: 6,
-    });
+    fn row(id: u64, offset: u16, continues: bool) -> Option<RowInfo> {
+        Some(RowInfo {
+            id,
+            offset,
+            continues,
+            indent: 6,
+        })
+    }
 
     #[test]
     fn a_drag_copies_from_the_press_to_the_release_cell_in_reading_order() {
         let mut selection = TextSelection::start(
             frame(&["[api] listening on :8080", "[api] ready"]),
-            vec![LINE, LINE],
+            vec![row(1, 0, false), row(2, 0, false)],
             Position::new(6, 3),
-        );
+        )
+        .unwrap();
         selection.drag_to(Position::new(16, 2));
         assert_eq!(selection.release().as_deref(), Some("on :8080\n[api] r"));
     }
@@ -179,9 +265,10 @@ mod tests {
     fn wrapped_rows_rejoin_without_their_indent() {
         let mut selection = TextSelection::start(
             frame(&["[api] a long line th", "      at wraps here"]),
-            vec![LINE, WRAP],
+            vec![row(1, 0, false), row(1, 1, true)],
             Position::new(6, 2),
-        );
+        )
+        .unwrap();
         selection.drag_to(Position::new(40, 9));
         assert_eq!(
             selection.release().as_deref(),
@@ -191,22 +278,32 @@ mod tests {
 
     #[test]
     fn a_click_selects_nothing_and_a_drag_stops_at_the_area_edge() {
-        let mut click = TextSelection::start(frame(&["[api] x"]), vec![LINE], Position::new(2, 2));
+        let mut click = TextSelection::start(
+            frame(&["[api] x"]),
+            vec![row(1, 0, false)],
+            Position::new(2, 2),
+        )
+        .unwrap();
         assert_eq!(click.release(), None);
 
         let mut selection = TextSelection::start(
             frame(&["one", "two"]),
-            vec![LINE, LINE],
+            vec![row(1, 0, false), row(2, 0, false)],
             Position::new(0, 0),
-        );
-        assert_eq!(selection.anchor, Position::new(0, 2));
+        )
+        .unwrap();
         selection.drag_to(Position::new(99, 99));
         assert_eq!(selection.release().as_deref(), Some("one\ntwo"));
     }
 
     #[test]
     fn painting_reverses_only_the_selected_cells() {
-        let mut selection = TextSelection::start(frame(&["abcd"]), vec![LINE], Position::new(1, 2));
+        let mut selection = TextSelection::start(
+            frame(&["abcd"]),
+            vec![row(1, 0, false)],
+            Position::new(1, 2),
+        )
+        .unwrap();
         selection.drag_to(Position::new(2, 2));
         let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 4));
         selection.paint(&mut buffer);

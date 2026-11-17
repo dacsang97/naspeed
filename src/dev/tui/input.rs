@@ -68,12 +68,20 @@ pub(super) fn handle_mouse(state: &mut TuiState, mouse: MouseEvent, screen: &mut
     let at = Position::new(mouse.column, mouse.row);
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            screen.selection = None;
-            state.scroll_by(-WHEEL_ROWS);
+            let rows = if screen.prepare_selection_scroll() {
+                selection_wheel_rows(screen)
+            } else {
+                WHEEL_ROWS
+            };
+            state.scroll_by(-rows);
         }
         MouseEventKind::ScrollDown => {
-            screen.selection = None;
-            state.scroll_by(WHEEL_ROWS);
+            let rows = if screen.prepare_selection_scroll() {
+                selection_wheel_rows(screen)
+            } else {
+                WHEEL_ROWS
+            };
+            state.scroll_by(rows);
         }
         MouseEventKind::Down(MouseButton::Left) => {
             screen.selection = None;
@@ -100,6 +108,10 @@ pub(super) fn handle_mouse(state: &mut TuiState, mouse: MouseEvent, screen: &mut
         }
         _ => {}
     }
+}
+
+fn selection_wheel_rows(screen: &ScreenMap) -> isize {
+    WHEEL_ROWS.min(screen.log_area.height.max(1) as isize)
 }
 
 fn page(screen: &ScreenMap) -> isize {

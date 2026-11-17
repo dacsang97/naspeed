@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(dev)* preserve mouse text selection while wheel-scrolling beyond the TUI viewport
+
 ## [0.10.1](https://github.com/dacsang97/naspeed/compare/v0.10.0...v0.10.1) - 2026-11-16
 
 ### Fixed

@@ -90,9 +90,11 @@ use Tab and Shift-Tab) with each process's state and the last build on the
 right. Wrapped rows of untagged lines hang two columns in.
 The mouse wheel scrolls the logs; scrolling back to the bottom (or `End`,
 `Enter`) follows new lines again. Drag over the logs to select text as in a
-terminal; releasing the button copies it, wrapped rows rejoined into their
-line. While a selection is shown the log view holds still; the next key,
-click or scroll drops it. The composer at the bottom is the filter, on a
+terminal; while holding the left button, use the wheel to extend the selection
+beyond the current viewport. Releasing the button copies it, with wrapped rows
+rejoined into their line. While a selection is shown the log view holds still;
+the next key or click drops it, as does scrolling after release. The composer
+at the bottom is the filter, on a
 surface shaded from the terminal's background (asked with OSC 11; terminals
 that do not answer get none): typing filters the logs as you go (smart-case
 literal, or a `re:` regex; an incomplete regex keeps the last valid filter),

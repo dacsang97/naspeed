@@ -1,11 +1,6 @@
 use std::time::{Duration, SystemTime};
 
-use ratatui::{
-    Terminal,
-    backend::TestBackend,
-    buffer::Buffer,
-    style::{Color, Modifier},
-};
+use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, style::Color};
 
 use super::super::log_bus::{DevEvent, LogLine, LogSource, Stream};
 use super::app_state::{SOURCE_CAPACITY, ScrollPosition, TuiState};
@@ -303,7 +298,7 @@ fn row_text(buffer: &Buffer, row: u16) -> String {
 }
 
 #[test]
-fn a_drag_selects_on_a_held_frame_and_the_wheel_or_a_tab_click_drops_it() {
+fn an_active_drag_scrolls_and_selects_beyond_one_viewport() {
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Position;
 
@@ -316,48 +311,65 @@ fn a_drag_selects_on_a_held_frame_and_the_wheel_or_a_tab_click_drops_it() {
     let mut terminal = Terminal::new(TestBackend::new(40, 9)).unwrap();
     let mut state = TuiState::new(&["api".to_string()]);
     let api = LogSource::App("api".to_string());
-    state.apply_event(log(api.clone(), "listening on :8080"));
-    state.apply_event(log(api.clone(), "ready"));
+    for index in 1..=8 {
+        state.apply_event(log(api.clone(), &format!("line-{index}")));
+    }
     let mut screen = ScreenMap::default();
     terminal
         .draw(|frame| render::render(frame, &mut state, &mut screen))
         .unwrap();
-    // Rows 1..5 hold the logs (two lines here); one app carries no tag.
-    assert!(row_text(terminal.backend().buffer(), 1).starts_with("listening"));
+    assert!(row_text(terminal.backend().buffer(), 3).starts_with("line-7"));
 
     handle_mouse(
         &mut state,
-        mouse(MouseEventKind::Down(MouseButton::Left), 13, 1),
+        mouse(MouseEventKind::Down(MouseButton::Left), 5, 3),
         &mut screen,
     );
     handle_mouse(
         &mut state,
-        mouse(MouseEventKind::Drag(MouseButton::Left), 2, 2),
+        mouse(MouseEventKind::Drag(MouseButton::Left), 4, 3),
         &mut screen,
     );
-    state.apply_event(log(api, "arrived meanwhile"));
+    state.apply_event(log(api, "line-9"));
     terminal
         .draw(|frame| render::render(frame, &mut state, &mut screen))
         .unwrap();
-    let buffer = terminal.backend().buffer();
     assert!(
-        row_text(buffer, 2).starts_with("ready"),
-        "the frame is held"
+        row_text(terminal.backend().buffer(), 3).starts_with("line-7"),
+        "new output must not move the held selection"
     );
-    assert!(buffer[(13, 1)].modifier.contains(Modifier::REVERSED));
-    let selection = screen.selection.as_ref().unwrap();
-    assert_eq!(selection.text(), ":8080\nrea");
 
     handle_mouse(
         &mut state,
-        mouse(MouseEventKind::ScrollUp, 5, 4),
+        mouse(MouseEventKind::ScrollUp, 0, 1),
         &mut screen,
     );
-    assert!(screen.selection.is_none());
+    assert!(screen.selection.is_some());
     assert!(!state.autoscroll);
     terminal
         .draw(|frame| render::render(frame, &mut state, &mut screen))
         .unwrap();
+    assert!(row_text(terminal.backend().buffer(), 1).starts_with("line-3"));
+    handle_mouse(
+        &mut state,
+        mouse(MouseEventKind::Drag(MouseButton::Left), 0, 1),
+        &mut screen,
+    );
+    let selection = screen.selection.as_mut().unwrap();
+    assert_eq!(
+        selection.release().as_deref(),
+        Some("line-3\nline-4\nline-5\nline-6\nline-7")
+    );
+
+    handle_mouse(
+        &mut state,
+        mouse(MouseEventKind::ScrollDown, 5, 4),
+        &mut screen,
+    );
+    assert!(
+        screen.selection.is_none(),
+        "a completed selection is dismissed"
+    );
 
     screen.start_selection(Position::new(0, 2));
     let build_tab = screen.tab_at(Position::new(9, 0)).unwrap();
