@@ -18,7 +18,7 @@ Invoked as `ns`, the binary never enters wrapper mode, so a typo like
 | `ns release [--snapshot] [--publish] [--target T]…` | Runs the `before` hooks, then builds every build variant × target (zig, xwin, universal2 and pinned glibc come from naspeed's cross setup). It writes reproducible archives, a checksum file, one SPDX SBOM per build, and `metadata.json` to `dist/`, which carries its own `.gitignore` so it never shows up in `git status`. Signing uses keyless cosign when it is available. `--publish` checks for a clean tree and a pushed tag, then creates the GitHub Release (draft and pre-release flags, filtered changelog) and uploads the assets. |
 | `ns image [--push] [--registry R] [--tag T]…` | Turns the release binaries into a multi-arch OCI image on distroless `:nonroot` and pushes it through the registry HTTP API, with no Docker daemon. Base layers are referenced, or mounted or copied server-side, never rebuilt. The SBOM is attached as `sha256-<digest>.sbom`. Without `--push` it only writes `<dist>/oci` and prints what it would push. |
 | `ns ci init [--force]` | Writes `.github/workflows/ns-ci.yml` (fmt, clippy, `ns test` on Linux and macOS), `ns-build.yml` (a snapshot release on main that warms the release cache) and `ns-release.yml` (on `v*` tags: release, then image). The naspeed store is carried in the GitHub Actions cache. Pull requests only restore it; only pushes to main save it. Each workflow gets the minimal permissions it needs. |
-| `ns cache export <dir> [--max-gb N]` / `ns cache import <dir>` | Copies the most recently used store entries (and cached test results) to or from a plain directory, which is what `actions/cache` saves. Import re-hashes every object and skips what the store already has. |
+| `ns cache export <dir> [--max-gb N]` / `ns cache import <dir>` | Copies complete native entries plus newest whole memo, test-result, Go build-cache, and image build-cache files to a transfer directory. `--max-gb` caps every transferred regular file; `0` exports no payload bytes. Imports merge auxiliary caches without deleting local files. |
 | `ns cache serve [--listen ADDR] [--allow-push]` | Serves this machine's store to other machines over HTTP, by default on its Tailscale IPv4 (`tailscale ip -4`), port 7878. Read-only unless `--allow-push`, which needs a token. See [Peer cache over Tailscale](./peer-cache). |
 | `ns cache push <url> [--since-hours H]` | Uploads entries used in the last H hours (default 24) to a peer started with `--allow-push`, objects first, entries last. |
 
@@ -180,6 +180,43 @@ volumes = ["/data"]
 ports = ["8317"]
 tags = ["{version}", "latest"]               # latest is skipped for snapshots and pre-releases
 ```
+
+For a Go service, configure the release and image behavior explicitly while
+keeping the intended public binary and image names:
+
+```toml
+[release]
+toolchain = "go"
+bins = ["lineart_api_svc"]
+go_main = "./cmd"
+go_ldflags = ["-s", "-w"]
+go_cgo = false
+targets = ["linux/amd64"]
+sbom = "none"
+changelog = { sort = "asc", exclude = ["^docs:", "^test:"] }
+
+[image]
+name = "docker.io/example/ght-lineart-api-svc"
+bin = "lineart_api_svc"
+platforms = ["linux/amd64"]
+dockerfile = "build/Dockerfile"
+extra_files = ["configs/casbin/rbac_model.conf", "assets"]
+tags = ["{version}", "latest"]
+```
+
+`ns release --snapshot` and `ns release --publish` use Go's content-addressed
+compiled build cache under the naspeed store (`go/build`), so the GitHub
+Action's store-directory cache carries it between CI runs. Dependency modules
+remain in the standard Go-managed cache and are not transferred by naspeed. Go
+targets use `GOOS/GOARCH` spelling. A tagged Go release takes its version from the single
+`vX.Y.Z` tag on `HEAD`; snapshots use `0.0.0-SNAPSHOT-<sha>`.
+
+When `image.dockerfile` is set, `ns image` stages the selected release binary
+and `extra_files` in an isolated context and runs Docker Buildx. `--push`
+selects `--push`; a local build selects `--load`. BuildKit's `mode=max` local
+cache lives under the naspeed OCI store and is reused on the next build.
+Dockerfile images currently require exactly one configured platform. Without
+`dockerfile`, the daemonless multi-platform OCI path described below is used.
 
 Defaults for `[image]`: the binary goes to `/usr/bin/{binary}`, runs as user
 `65532:65532`, and sits on `gcr.io/distroless/static-debian12:nonroot` (musl)

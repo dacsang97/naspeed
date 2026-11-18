@@ -95,8 +95,13 @@ pub struct Version {
 pub fn resolve_version(state: &GitState, package_version: &str, snapshot: bool) -> Result<Version> {
     if snapshot {
         let sha = state.short.as_deref().unwrap_or("nogit");
+        let base = if package_version.is_empty() {
+            "0.0.0"
+        } else {
+            package_version
+        };
         return Ok(Version {
-            version: format!("{package_version}-SNAPSHOT-{sha}"),
+            version: format!("{base}-SNAPSHOT-{sha}"),
             tag: None,
         });
     }
@@ -106,9 +111,28 @@ pub fn resolve_version(state: &GitState, package_version: &str, snapshot: bool) 
         .filter(|t| tag_version(t).is_some())
         .collect();
     if tags.is_empty() {
-        bail!(
-            "HEAD has no vX.Y.Z tag; tag the release (git tag v{package_version}) or use --snapshot"
-        );
+        let hint = if package_version.is_empty() {
+            "tag the release (git tag vX.Y.Z) or use --snapshot".to_string()
+        } else {
+            format!("tag the release (git tag v{package_version}) or use --snapshot")
+        };
+        bail!("HEAD has no vX.Y.Z tag; {hint}");
+    }
+    if package_version.is_empty() {
+        if tags.len() != 1 {
+            bail!(
+                "HEAD has multiple release tags ({}); keep exactly one vX.Y.Z tag",
+                tags.iter()
+                    .map(|t| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        let tag = tags[0];
+        return Ok(Version {
+            version: tag_version(tag).unwrap_or_default().to_string(),
+            tag: Some(tag.to_string()),
+        });
     }
     match tags
         .iter()

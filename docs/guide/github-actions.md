@@ -13,9 +13,6 @@ brings naspeed to a workflow in one step:
 5. writes a **naspeed Report** to the job summary: rustc hits and misses,
    test binaries replayed, time saved and what happened to the cache.
 
-It replaces `Swatinem/rust-cache`, sccache setups and hand-written
-`actions/cache` steps for the build. Install Rust before it.
-
 ## Check and test
 
 ```yaml
@@ -180,3 +177,50 @@ The naspeed binary itself follows `version` (`latest` by default); pin it
 `ns ci init` writes a complete set of workflows for a project (`ns-ci.yml`,
 `ns-build.yml`, `ns-release.yml`) with the same cache rules; it is the quickest
 start for a repository that has no CI yet. See [ns front-end](./ns).
+
+## Private Go modules
+
+naspeed does not put repository credentials in `ns.toml` or command arguments.
+Local Go development and releases inherit the standard Go and Git environment,
+so existing `GOPRIVATE`, `GONOSUMDB`, `GOPROXY`, SSH agent, `.netrc`, and Git
+credential-helper settings continue to work unchanged.
+
+Generated workflows recognize these repository settings:
+
+- variable `GOPRIVATE`: private module path patterns;
+- optional variables `GONOSUMDB` and `GOPROXY`; when absent, Go keeps its own
+  defaults;
+- secret `GO_PRIVATE_TOKEN`: a read-only token that can clone the required
+  private repositories on `github.com`;
+- secrets `GO_PROXY_USERNAME` and `GO_PROXY_PASSWORD`: optional credentials
+  for the HTTPS hosts in `GOPROXY`. Both must be present, and they are never
+  substituted with `GO_PRIVATE_TOKEN`.
+
+The workflow creates a mode `0700` directory under `RUNNER_TEMP`. Git reads
+its token from a mode `0600` file through an HTTPS- and `github.com`-scoped
+credential helper;
+authenticated module proxies use a separate mode `0600` netrc file. Comma-
+and pipe-separated `GOPROXY` fallback lists are supported. With proxy
+credentials, every non-`direct`/`off` entry must use `https://`, a DNS or IPv4
+hostname, an optional numeric port from 1 through 65535, and an optional path.
+Userinfo, malformed hosts, plaintext HTTP, and IPv6 proxy URLs are rejected,
+and the list must contain at least one HTTPS host.
+
+Git configuration and the job environment contain only paths to these files,
+not credential values. An `if: always()` final step removes the directory
+after cache saves, reports, uploads, and publishing steps, including when an
+earlier step fails. No helper is enabled and no directory is created when the
+corresponding secrets are absent, so public-only builds retain normal Go and
+Git behavior.
+
+Existing global Git configuration and `GIT_CONFIG_COUNT` entries remain active;
+the workflow appends its three HTTPS-scoped entries at the next free indices.
+
+Repository variables and secrets containing line breaks are rejected before
+they can reach `GITHUB_ENV`, Git's credential protocol, or netrc. Proxy
+usernames and passwords must also be single tokens without whitespace.
+
+Go's compiled-object cache is eligible for naspeed cache export. The module
+download cache and Git VCS cache are not exported, because they can contain
+private source and repository metadata. Private dependencies are therefore
+downloaded again on a fresh runner.

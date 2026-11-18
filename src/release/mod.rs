@@ -53,7 +53,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 
 use crate::project::Project;
-use crate::project::ns_config::SbomMode;
+use crate::project::ns_config::{ReleaseToolchain, SbomMode};
 use dist::{Kind, Metadata};
 use git_info::GitState;
 
@@ -89,6 +89,15 @@ pub struct ReleaseArgs {
     pub remote: String,
 }
 
+fn validate_go_build_count(count: usize) -> Result<()> {
+    if count != 1 {
+        bail!(
+            "Go releases currently support exactly one build; found {count}. Use one release bin/build until per-build Go main packages are supported"
+        );
+    }
+    Ok(())
+}
+
 pub fn run(args: ReleaseArgs) -> Result<u8> {
     if args.publish && args.snapshot {
         bail!("--publish cannot be combined with --snapshot");
@@ -98,8 +107,20 @@ pub fn run(args: ReleaseArgs) -> Result<u8> {
     let cfg = &project.config.release;
     let builds = build_plan::resolve(&project, &args.targets)?;
     let targets = build_plan::all_targets(&builds);
-    target_matrix::check_installed(&targets, &crate::cross::installed_targets())?;
+    let toolchain = cfg.toolchain.unwrap_or_else(|| {
+        if graph.root.join("go.mod").is_file() && !graph.root.join("Cargo.toml").is_file() {
+            ReleaseToolchain::Go
+        } else {
+            ReleaseToolchain::Cargo
+        }
+    });
+    if toolchain == ReleaseToolchain::Cargo {
+        target_matrix::check_installed(&targets, &crate::cross::installed_targets())?;
+    }
     checksums::check_file_name(&cfg.checksum)?;
+    if toolchain == ReleaseToolchain::Go {
+        validate_go_build_count(builds.len())?;
+    }
     let exclude = changelog::compile(&cfg.changelog)?;
 
     let state = GitState::read(&graph.root);
@@ -141,7 +162,10 @@ pub fn run(args: ReleaseArgs) -> Result<u8> {
     let _release = crate::ui::indent();
     let env = build_plan::base_env(&version.version, tag, state.commit.as_deref(), sde);
     build_plan::run_hooks(&cfg.before, &graph.root, &env)?;
-    let manifest_path = graph.root.join("Cargo.toml");
+    let manifest_path = match toolchain {
+        ReleaseToolchain::Cargo => graph.root.join("Cargo.toml"),
+        ReleaseToolchain::Go => graph.root.join("go.mod"),
+    };
     let build_start = std::time::Instant::now();
     crate::ui_info!("building binaries");
     let building = crate::ui::indent();
@@ -153,6 +177,11 @@ pub fn run(args: ReleaseArgs) -> Result<u8> {
             builds: &builds,
             base_env: &env,
             dist_dir: &dist_dir,
+            root: &graph.root,
+            toolchain,
+            go_main: &cfg.go_main,
+            go_ldflags: &cfg.go_ldflags,
+            go_cgo: cfg.go_cgo,
         },
         &targets,
         usize::from(args.jobs),
@@ -166,7 +195,7 @@ pub fn run(args: ReleaseArgs) -> Result<u8> {
     } = package::package_all(&pack)?;
     let mut uploads: Vec<PathBuf> = sums.iter().map(|(n, _)| dist_dir.join(n)).collect();
 
-    if cfg.sbom == SbomMode::Spdx {
+    if cfg.sbom == SbomMode::Spdx && toolchain == ReleaseToolchain::Cargo {
         for build in &builds {
             let info = sbom::SbomInfo {
                 binary: build.binary(),
@@ -260,4 +289,17 @@ pub fn run(args: ReleaseArgs) -> Result<u8> {
     }
     crate::ui::took(release_start);
     Ok(0)
+}
+
+#[cfg(test)]
+mod go_tests {
+    use super::*;
+
+    #[test]
+    fn multiple_go_builds_are_rejected_before_release_work() {
+        let err = validate_go_build_count(2).unwrap_err().to_string();
+        assert!(err.contains("exactly one build"), "{err}");
+        assert!(err.contains("per-build Go main"), "{err}");
+        validate_go_build_count(1).unwrap();
+    }
 }
