@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/dacsang97/naspeed/compare/v0.11.0...v0.12.0) - 2026-11-18
+
+### Added
+
+- *(release)* support Go images and private modules ([#38](https://github.com/dacsang97/naspeed/pull/38))
+
 ### Added
 
 - *(ci)* configure private Go repositories and proxies with separate file-backed credentials that are always cleaned up
