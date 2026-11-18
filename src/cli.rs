@@ -269,14 +269,8 @@ pub fn run(args: Vec<OsString>) -> Result<u8> {
         }
         Command::Purge(a) => commands::purge::run(a),
         Command::Dev(a) => crate::dev::run(a),
-        Command::Release(a) => {
-            reject_go_only("ns release")?;
-            crate::release::run(a)
-        }
-        Command::Image(a) => {
-            reject_go_only("ns image")?;
-            crate::image::run(a)
-        }
+        Command::Release(a) => crate::release::run(a),
+        Command::Image(a) => crate::image::run(a),
         Command::Ci(c) => {
             reject_go_only("ns ci")?;
             crate::ci::run(c)

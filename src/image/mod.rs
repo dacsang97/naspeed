@@ -12,6 +12,7 @@
 
 mod blob_push;
 mod build_provenance;
+mod dockerfile;
 mod image_config;
 mod image_inputs;
 mod image_tags;
@@ -100,6 +101,21 @@ pub fn run(args: ImageArgs) -> Result<u8> {
             choose_without_metadata(&project.config, &flag_paths, &bins)?
         }
     };
+    if project.config.image.dockerfile.is_some() {
+        let meta = metadata
+            .as_ref()
+            .context("Dockerfile images require dist/metadata.json from `ns release`")?;
+        dockerfile::run(
+            &project,
+            &dist,
+            meta,
+            &chosen,
+            &args.tags,
+            args.registry.as_deref(),
+            args.push,
+        )?;
+        return Ok(0);
+    }
     let inputs = resolve_platforms(&project, &dist, metadata.as_ref(), &flags, &chosen)?;
     let release = ReleaseInfo::new(&project, metadata.as_ref(), &chosen)?;
     let image = &project.config.image;

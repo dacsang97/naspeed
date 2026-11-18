@@ -170,6 +170,9 @@ impl Platform {
 
     /// `linux/amd64` for `x86_64-unknown-linux-*`, `linux/arm64` for `aarch64-unknown-linux-*`.
     pub fn for_target(target: &str) -> Option<Platform> {
+        if target.contains('/') {
+            return Platform::parse(target).ok();
+        }
         let arch = match target.split('-').next()? {
             "x86_64" => "amd64",
             "aarch64" => "arm64",

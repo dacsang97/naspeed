@@ -99,6 +99,207 @@ const CHECKOUT_STEP: &str = r#"      - uses: @CHECKOUT@
           echo "rustc=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
 "#;
 
+const GO_PRIVATE_STEP: &str = r#"      - name: Configure private Go modules
+        shell: bash
+        env:
+          PRIVATE_PATTERNS: ${{ vars.GOPRIVATE }}
+          PRIVATE_NOSUMDB: ${{ vars.GONOSUMDB }}
+          PRIVATE_PROXY: ${{ vars.GOPROXY }}
+          GIT_TOKEN: ${{ secrets.GO_PRIVATE_TOKEN }}
+          PROXY_USERNAME: ${{ secrets.GO_PROXY_USERNAME }}
+          PROXY_PASSWORD: ${{ secrets.GO_PROXY_PASSWORD }}
+        run: |
+          # Process environments cannot represent NUL. Reject the remaining
+          # line/protocol delimiters before writing any supplied value.
+          reject_line_breaks() {
+            case "$2" in
+              *$'\r'*|*$'\n'*) echo "::error::$1 must not contain CR or LF"; exit 1 ;;
+            esac
+          }
+          reject_line_breaks GOPRIVATE "$PRIVATE_PATTERNS"
+          reject_line_breaks GONOSUMDB "$PRIVATE_NOSUMDB"
+          reject_line_breaks GOPROXY "$PRIVATE_PROXY"
+          reject_line_breaks GO_PRIVATE_TOKEN "$GIT_TOKEN"
+          reject_line_breaks GO_PROXY_USERNAME "$PROXY_USERNAME"
+          reject_line_breaks GO_PROXY_PASSWORD "$PROXY_PASSWORD"
+          case "$PROXY_USERNAME$PROXY_PASSWORD" in
+            *[[:space:]]*)
+              echo "::error::proxy credentials must not contain whitespace"
+              exit 1
+              ;;
+          esac
+          if [ -n "$GIT_TOKEN" ]; then
+            if [ "${GIT_CONFIG_COUNT+x}" = x ]; then
+              git_config_count=$GIT_CONFIG_COUNT
+              case "$git_config_count" in
+                ''|*[!0-9]*|0[0-9]*)
+                  echo "::error::GIT_CONFIG_COUNT must be a non-negative decimal integer"
+                  exit 1
+                  ;;
+              esac
+              if [ ${#git_config_count} -gt 16 ] ||
+                 [ "$git_config_count" -gt 9007199254740988 ] 2>/dev/null; then
+                echo "::error::GIT_CONFIG_COUNT is too large to append private Git configuration"
+                exit 1
+              fi
+            else
+              git_config_count=0
+            fi
+          fi
+          if [ -n "$PRIVATE_PATTERNS" ]; then
+            printf 'GOPRIVATE=%s\n' "$PRIVATE_PATTERNS" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$PRIVATE_NOSUMDB" ]; then
+            printf 'GONOSUMDB=%s\n' "$PRIVATE_NOSUMDB" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$PRIVATE_PROXY" ]; then
+            case "$PRIVATE_PROXY" in
+              *://*@*) echo "::error::GOPROXY must not contain credentials"; exit 1 ;;
+            esac
+            printf 'GOPROXY=%s\n' "$PRIVATE_PROXY" >> "$GITHUB_ENV"
+          fi
+          if { [ -n "$PROXY_USERNAME" ] && [ -z "$PROXY_PASSWORD" ]; } ||
+             { [ -z "$PROXY_USERNAME" ] && [ -n "$PROXY_PASSWORD" ]; }; then
+            echo "::error::GO_PROXY_USERNAME and GO_PROXY_PASSWORD must be set together"
+            exit 1
+          fi
+          if [ -n "$GIT_TOKEN" ] || [ -n "$PROXY_USERNAME" ]; then
+            private_dir="$(mktemp -d "$RUNNER_TEMP/ns-go-private.XXXXXX")"
+            cleanup_private_dir() { rm -rf -- "$private_dir"; }
+            trap cleanup_private_dir EXIT
+            chmod 700 "$private_dir"
+            printf 'NS_GO_PRIVATE_DIR=%s\n' "$private_dir" >> "$GITHUB_ENV"
+            trap - EXIT
+          fi
+          if [ -n "$GIT_TOKEN" ]; then
+            token_file="$private_dir/git-token"
+            printf '%s' "$GIT_TOKEN" > "$token_file"
+            chmod 600 "$token_file"
+            helper="$private_dir/git-credential"
+            cat > "$helper" <<'EOF'
+          #!/bin/sh
+          protocol=
+          host=
+          while IFS='=' read -r key value; do
+            [ "$key" = protocol ] && protocol=$value
+            [ "$key" = host ] && host=$value
+          done
+          if [ "$1" = get ] && [ "$protocol" = https ] && [ "$host" = github.com ]; then
+            printf 'username=x-access-token\npassword='
+            cat "$NS_GO_GIT_TOKEN_FILE"
+            printf '\n'
+          fi
+          EOF
+            chmod 700 "$helper"
+            printf 'NS_GO_GIT_TOKEN_FILE=%s\n' "$token_file" >> "$GITHUB_ENV"
+            git_key_0=$git_config_count
+            git_key_1=$((git_config_count + 1))
+            git_key_2=$((git_config_count + 2))
+            git_config_count=$((git_config_count + 3))
+            printf '%s\n' \
+              "GIT_CONFIG_KEY_${git_key_0}=credential.https://github.com.helper" \
+              "GIT_CONFIG_VALUE_${git_key_0}=" \
+              "GIT_CONFIG_KEY_${git_key_1}=credential.https://github.com.helper" \
+              "GIT_CONFIG_VALUE_${git_key_1}=$helper" \
+              "GIT_CONFIG_KEY_${git_key_2}=credential.https://github.com.useHttpPath" \
+              "GIT_CONFIG_VALUE_${git_key_2}=false" \
+              "GIT_CONFIG_COUNT=$git_config_count" >> "$GITHUB_ENV"
+          fi
+          if [ -n "$PROXY_USERNAME" ]; then
+            [ -n "$PRIVATE_PROXY" ] || {
+              echo "::error::GOPROXY is required with proxy credentials"
+              exit 1
+            }
+            netrc="$private_dir/netrc"
+            : > "$netrc"
+            old_ifs=$IFS
+            IFS=',|'
+            proxy_hosts=0
+            case $- in
+              *f*) glob_was_disabled=1 ;;
+              *) glob_was_disabled=0; set -f ;;
+            esac
+            for proxy in $PRIVATE_PROXY; do
+              case "$proxy" in
+                direct|off|'') continue ;;
+                https://*) ;;
+                http://*)
+                  echo "::error::authenticated GOPROXY entries must use HTTPS"
+                  exit 1
+                  ;;
+                *)
+                  echo "::error::authenticated GOPROXY entries must be valid HTTPS URLs"
+                  exit 1
+                  ;;
+              esac
+              location=${proxy#https://}
+              authority=${location%%/*}
+              case "$authority" in
+                ''|*@*|*\?*|*\#*|*[[:space:]]*|*\[*|*\]*)
+                  echo "::error::authenticated GOPROXY contains an invalid HTTPS authority (IPv6 is not supported)"
+                  exit 1
+                  ;;
+              esac
+              case "$authority" in
+                *:*)
+                  host=${authority%:*}
+                  port=${authority##*:}
+                  case "$host" in *:*) host= ;; esac
+                  case "$port" in ''|*[!0-9]*) port=0 ;; esac
+                  [ "$port" -ge 1 ] 2>/dev/null && [ "$port" -le 65535 ] 2>/dev/null || {
+                    echo "::error::authenticated GOPROXY contains an invalid port"
+                    exit 1
+                  }
+                  ;;
+                *) host=$authority ;;
+              esac
+              case "$host" in ''|.*|*.|*..*) host= ;; esac
+              case "$host" in *[!0-9.]*) numeric_host=0 ;; *) numeric_host=1 ;; esac
+              host_parts=0
+              [ ${#host} -le 253 ] || host=
+              old_host_ifs=$IFS
+              IFS=.
+              for label in $host; do
+                host_parts=$((host_parts + 1))
+                case "$label" in
+                  ''|*[!A-Za-z0-9-]*|-*|*-*) host=; break ;;
+                esac
+                [ ${#label} -le 63 ] || { host=; break; }
+                if [ "$numeric_host" -eq 1 ] && [ "$label" -gt 255 ] 2>/dev/null; then
+                  host=
+                  break
+                fi
+              done
+              IFS=$old_host_ifs
+              if [ "$numeric_host" -eq 1 ] && [ "$host_parts" -ne 4 ]; then host=; fi
+              [ -n "$host" ] || {
+                echo "::error::authenticated GOPROXY contains an invalid DNS/IPv4 hostname"
+                exit 1
+              }
+              machine=$authority
+              printf 'machine %s login %s password %s\n' "$machine" "$PROXY_USERNAME" "$PROXY_PASSWORD" >> "$netrc"
+              proxy_hosts=$((proxy_hosts + 1))
+            done
+            [ "$glob_was_disabled" -eq 1 ] || set +f
+            IFS=$old_ifs
+            [ "$proxy_hosts" -gt 0 ] || {
+              echo "::error::authenticated GOPROXY requires at least one HTTPS host"
+              exit 1
+            }
+            chmod 600 "$netrc"
+            printf 'NETRC=%s\n' "$netrc" >> "$GITHUB_ENV"
+          fi
+"#;
+
+const GO_PRIVATE_CLEANUP_STEP: &str = r#"      - name: Remove private Go credentials
+        if: always()
+        shell: bash
+        run: |
+          case "${NS_GO_PRIVATE_DIR:-}" in
+            "$RUNNER_TEMP"/ns-go-private.*) rm -rf -- "$NS_GO_PRIVATE_DIR" ;;
+          esac
+"#;
+
 const INSTALL_NASPEED_STEP: &str = r#"      - name: Install naspeed ${{ env.NS_VERSION }}
         shell: bash
         run: |
@@ -195,6 +396,9 @@ pub fn setup_steps(job: Job, tc: Toolchain) -> String {
             .replace("@MSVC_COMMENT@", msvc_comment)
             .replace("@SETUP_FLAGS@", flags),
     );
+    if job != Job::Image {
+        out.push_str(GO_PRIVATE_STEP);
+    }
     let kind = match job {
         Job::Test => Some(CacheKind::Test),
         Job::Snapshot | Job::Release => Some(CacheKind::Release),
@@ -238,6 +442,12 @@ pub fn save_steps(kind: CacheKind) -> String {
     SAVE_STEPS
         .replace("@KEY@", &key(kind))
         .replace("@MAX_GB@", &max_gb.to_string())
+}
+
+/// Remove ephemeral Go credential files. Append after every cache, report, or
+/// publishing step in a job whose setup includes `GO_PRIVATE_STEP`.
+pub fn go_private_cleanup_step() -> &'static str {
+    GO_PRIVATE_CLEANUP_STEP
 }
 
 /// The `env:` block every workflow shares.
@@ -291,6 +501,38 @@ mod tests {
         assert!(!text.contains("--cross"));
         assert!(text.contains("ns-test-${{ runner.os }}"));
         assert!(!text.contains(CACHE_SAVE));
+        assert!(text.contains("Configure private Go modules"));
+        assert!(text.contains("secrets.GO_PRIVATE_TOKEN"));
+        assert!(text.contains("[ \"$protocol\" = https ] && [ \"$host\" = github.com ]"));
+        assert!(text.contains("GIT_CONFIG_COUNT must be a non-negative decimal integer"));
+        assert!(text.contains("9007199254740988"));
+        assert!(text.contains("git_key_0=$git_config_count"));
+        assert!(text.contains("GIT_CONFIG_KEY_${git_key_0}=credential.https://github.com.helper"));
+        assert!(text.contains("GIT_CONFIG_VALUE_${git_key_0}="));
+        assert!(text.contains("GIT_CONFIG_KEY_${git_key_1}=credential.https://github.com.helper"));
+        assert!(
+            text.contains("GIT_CONFIG_KEY_${git_key_2}=credential.https://github.com.useHttpPath")
+        );
+        assert!(text.contains("GIT_CONFIG_COUNT=$git_config_count"));
+        assert!(!text.contains("GIT_CONFIG_KEY_0=credential.helper\n"));
+        assert!(text.contains("secrets.GO_PROXY_USERNAME"));
+        assert!(text.contains("secrets.GO_PROXY_PASSWORD"));
+        assert!(text.contains("mktemp -d \"$RUNNER_TEMP/ns-go-private.XXXXXX\""));
+        assert!(text.contains("chmod 600 \"$token_file\""));
+        assert!(text.contains("cat \"$NS_GO_GIT_TOKEN_FILE\""));
+        assert!(text.contains("chmod 600 \"$netrc\""));
+        assert!(text.contains("IFS=',|'"));
+        assert!(text.contains("authenticated GOPROXY contains an invalid port"));
+        assert!(text.contains("invalid DNS/IPv4 hostname"));
+        assert!(text.contains("IPv6 is not supported"));
+        let mktemp = text.find("private_dir=\"$(mktemp").unwrap();
+        let trap = text.find("trap cleanup_private_dir EXIT").unwrap();
+        let exported = text.find("NS_GO_PRIVATE_DIR=%s").unwrap();
+        let clear_trap = text.find("trap - EXIT").unwrap();
+        assert!(mktemp < trap && trap < exported && exported < clear_trap);
+        assert!(text.contains("GOPROXY must not contain credentials"));
+        assert!(!text.contains("printf 'GO_PRIVATE_TOKEN="));
+        assert!(!text.contains("git config --global"));
     }
 
     #[test]
@@ -311,6 +553,7 @@ mod tests {
         let text = setup_steps(Job::Image, TC);
         assert!(!text.contains("cache/restore"));
         assert!(!text.contains("cache import"));
+        assert!(!text.contains("GO_PRIVATE_TOKEN"));
     }
 
     #[test]
@@ -319,5 +562,13 @@ mod tests {
         assert_eq!(text.matches(&format!("if: {SAVE_GUARD}")).count(), 2);
         assert!(text.contains("--max-gb 4"));
         assert!(save_steps(CacheKind::Test).contains("--max-gb 3"));
+    }
+
+    #[test]
+    fn private_cleanup_is_guarded_and_unconditional() {
+        let text = go_private_cleanup_step();
+        assert!(text.contains("if: always()"));
+        assert!(text.contains("\"$RUNNER_TEMP\"/ns-go-private.*"));
+        assert!(text.contains("rm -rf -- \"$NS_GO_PRIVATE_DIR\""));
     }
 }

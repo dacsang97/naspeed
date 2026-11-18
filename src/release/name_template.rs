@@ -32,7 +32,7 @@ pub fn render(template: &str, vars: &NameVars) -> Result<String> {
             "binary" => vars.binary.to_string(),
             "version" => vars.version.to_string(),
             "tag" => vars.tag.to_string(),
-            "target" => vars.target.to_string(),
+            "target" => archive_target(vars.target),
             "os" => go_os(vars.target)?.to_string(),
             "arch" => go_arch(vars.target)?.to_string(),
             other => bail!(
@@ -49,6 +49,17 @@ pub fn render(template: &str, vars: &NameVars) -> Result<String> {
     Ok(out)
 }
 
+/// Filesystem-safe target spelling for archive names. Go platforms retain
+/// their semantic `os/arch` spelling in metadata, but use `os-arch` in names.
+fn archive_target(target: &str) -> String {
+    match target.split_once('/') {
+        Some((os, arch)) if !os.is_empty() && !arch.is_empty() && !arch.contains('/') => {
+            format!("{os}-{arch}")
+        }
+        _ => target.to_string(),
+    }
+}
+
 /// The triple a release target builds for (`.2.17` glibc pins stripped).
 fn triple(target: &str) -> String {
     match classify(target) {
@@ -59,6 +70,15 @@ fn triple(target: &str) -> String {
 
 /// OS name for a target: `linux`, `darwin`, `windows`, ...
 pub fn go_os(target: &str) -> Result<&'static str> {
+    if let Some((os, _)) = target.split_once('/') {
+        return match os {
+            "linux" => Ok("linux"),
+            "darwin" => Ok("darwin"),
+            "windows" => Ok("windows"),
+            "freebsd" => Ok("freebsd"),
+            _ => bail!("no os name for target {target}"),
+        };
+    }
     let t = triple(target);
     let os = if t.contains("-linux-") {
         if t.contains("-android") {
@@ -86,6 +106,19 @@ pub fn go_os(target: &str) -> Result<&'static str> {
 
 /// Arch name for a target: `amd64`, `arm64`, `386`; `all` for universal2.
 pub fn go_arch(target: &str) -> Result<&'static str> {
+    if let Some((_, arch)) = target.split_once('/') {
+        return match arch {
+            "amd64" => Ok("amd64"),
+            "arm64" => Ok("arm64"),
+            "386" => Ok("386"),
+            "arm" => Ok("arm"),
+            "riscv64" => Ok("riscv64"),
+            "ppc64le" => Ok("ppc64le"),
+            "ppc64" => Ok("ppc64"),
+            "s390x" => Ok("s390x"),
+            _ => bail!("no arch name for target {target}"),
+        };
+    }
     if target == UNIVERSAL2 {
         return Ok("all");
     }
@@ -143,6 +176,10 @@ mod tests {
         assert_eq!(
             render("{os}_{arch}", &vars("i686-pc-windows-msvc")).unwrap(),
             "windows_386"
+        );
+        assert_eq!(
+            render("{binary}-{version}-{target}", &vars("linux/amd64")).unwrap(),
+            "api-noui-1.2.0-linux-amd64"
         );
     }
 

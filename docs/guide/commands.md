@@ -19,5 +19,6 @@ a project you are actively developing alone.
 
 The project-level commands (`ns dev`, `ns test`, `ns release`, `ns image`,
 `ns ci init`, `ns cache …`) are described in [ns front-end](./ns). `ns dev`
-also supports Go modules and `go.work`; the other project commands remain
-Cargo-only.
+supports Cargo workspaces and Go modules/workspaces. `ns release` and
+`ns image` support Go modules as described there; the remaining build and
+test commands are Cargo-specific.

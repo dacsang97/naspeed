@@ -106,6 +106,13 @@ impl Default for LogDir {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReleaseToolchain {
+    Cargo,
+    Go,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReleaseConfig {
@@ -115,6 +122,14 @@ pub struct ReleaseConfig {
     /// Build variants: the same binary with other
     /// features or another output name (e.g. `api` and `api-noui`).
     pub builds: Vec<BuildConfig>,
+    /// Build tool. Auto-detected from Cargo.toml/go.mod when omitted.
+    pub toolchain: Option<ReleaseToolchain>,
+    /// Go main package built for every binary (for example `./cmd`).
+    pub go_main: PathBuf,
+    /// Arguments joined and passed to `go build -ldflags`.
+    pub go_ldflags: Vec<String>,
+    /// Enable CGO for Go release builds.
+    pub go_cgo: bool,
     pub targets: Vec<String>,
     pub profile: String,
     /// Shell commands run at the workspace root before any build, e.g.
@@ -135,8 +150,8 @@ pub struct ReleaseConfig {
 }
 
 /// One build variant. Every build gets `NS_VERSION`, `NS_TAG`, `NS_COMMIT`
-/// and `SOURCE_DATE_EPOCH` in its environment (read them with
-/// `option_env!`), the Rust counterpart of `-ldflags -X main.version=…`.
+/// and `SOURCE_DATE_EPOCH` in its environment (available to Rust code through
+/// `option_env!`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildConfig {
@@ -229,6 +244,10 @@ impl Default for ReleaseConfig {
         ReleaseConfig {
             bins: Vec::new(),
             builds: Vec::new(),
+            toolchain: None,
+            go_main: PathBuf::from("./cmd"),
+            go_ldflags: vec!["-s".into(), "-w".into()],
+            go_cgo: false,
             targets: DEFAULT_TARGETS.iter().map(|s| s.to_string()).collect(),
             profile: "release".into(),
             before: Vec::new(),
@@ -301,6 +320,11 @@ pub struct ImageConfig {
     /// targets, `cc-debian12:nonroot` for gnu.
     pub base: Option<String>,
     pub platforms: Vec<String>,
+    /// Build this Dockerfile with Docker Buildx instead of composing an OCI
+    /// layer directly. Relative to the workspace root.
+    pub dockerfile: Option<PathBuf>,
+    /// Files/directories copied into the isolated Docker build context.
+    pub extra_files: Vec<PathBuf>,
     /// Default: `[path]`.
     pub entrypoint: Vec<String>,
     /// Default arguments (Dockerfile `CMD`), e.g. `["serve", "-config", "/data/config.yaml"]`.
@@ -332,6 +356,8 @@ impl Default for ImageConfig {
             name: None,
             base: None,
             platforms: vec!["linux/amd64".into(), "linux/arm64".into()],
+            dockerfile: None,
+            extra_files: Vec::new(),
             entrypoint: Vec::new(),
             cmd: Vec::new(),
             bin: None,
@@ -386,8 +412,12 @@ test = true
 package = "example.test/service/cmd/api"
 
 [release]
+toolchain = "go"
 bins = ["api"]
-targets = ["x86_64-unknown-linux-musl", "universal2-apple-darwin"]
+go_main = "./cmd/api"
+go_ldflags = ["-s", "-w"]
+go_cgo = false
+targets = ["linux/amd64"]
 profile = "release"
 archive = { format = "tar.gz", windows = "zip", files = ["README.md", "LICENSE"] }
 sign = "cosign"
@@ -395,7 +425,9 @@ sign = "cosign"
 [image]
 name = "ghcr.io/owner/api"
 base = "gcr.io/distroless/cc-debian12"
-platforms = ["linux/amd64", "linux/arm64"]
+platforms = ["linux/amd64"]
+dockerfile = "build/Dockerfile"
+extra_files = ["configs/rbac.conf", "assets"]
 entrypoint = ["/api"]
 "#;
 
@@ -410,9 +442,21 @@ entrypoint = ["/api"]
             cfg.dev.apps["api"].package.as_deref(),
             Some("example.test/service/cmd/api")
         );
-        assert_eq!(cfg.release.targets.len(), 2);
+        assert_eq!(cfg.release.toolchain, Some(ReleaseToolchain::Go));
+        assert_eq!(cfg.release.go_main, PathBuf::from("./cmd/api"));
+        assert_eq!(cfg.release.go_ldflags, ["-s", "-w"]);
+        assert!(!cfg.release.go_cgo);
+        assert_eq!(cfg.release.targets, ["linux/amd64"]);
         assert_eq!(cfg.release.archive.files.len(), 2);
         assert_eq!(cfg.release.sign, SignMode::Cosign);
+        assert_eq!(
+            cfg.image.dockerfile.as_deref(),
+            Some(Path::new("build/Dockerfile"))
+        );
+        assert_eq!(
+            cfg.image.extra_files,
+            [PathBuf::from("configs/rbac.conf"), PathBuf::from("assets")]
+        );
         assert_eq!(cfg.image.entrypoint, vec!["/api".to_string()]);
     }
 

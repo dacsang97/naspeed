@@ -45,7 +45,13 @@ pub fn resolve_tags(
         }
         tags.push(tag);
     }
-    Ok(dedup(tags))
+    let tags = dedup(tags);
+    if tags.is_empty() {
+        bail!(
+            "image tags resolve empty for this release; configure [image].tags with {{version}} and optionally latest"
+        );
+    }
+    Ok(tags)
 }
 
 fn dedup(tags: Vec<String>) -> Vec<String> {
@@ -149,11 +155,10 @@ mod tests {
             resolve_tags(&[], &strings(&["{tag}", "{version}", "latest"]), &snapshot).unwrap(),
             strings(&["1.2.1-SNAPSHOT-0123456"])
         );
-        assert!(
-            resolve_tags(&[], &strings(&["{tag}", "latest"]), &snapshot)
-                .unwrap()
-                .is_empty()
-        );
+        let err = resolve_tags(&[], &strings(&["{tag}", "latest"]), &snapshot)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("resolve empty"), "{err}");
     }
 
     #[test]

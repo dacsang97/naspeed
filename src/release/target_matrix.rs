@@ -19,6 +19,8 @@ use anyhow::{Context, Result, bail};
 
 use super::build_plan::ReleaseBuild;
 use crate::commands::build::{profile_dir_name, split_glibc};
+use crate::project::ns_config::ReleaseToolchain;
+
 use crate::cross::APPLE_TARGETS;
 
 pub const UNIVERSAL2: &str = "universal2-apple-darwin";
@@ -72,7 +74,7 @@ pub fn check_installed(targets: &[String], installed: &[String]) -> Result<()> {
 }
 
 pub fn is_windows(target: &str) -> bool {
-    target.contains("-windows-")
+    target.contains("-windows-") || target.starts_with("windows/")
 }
 
 pub fn exe_name(bin: &str, target: &str) -> String {
@@ -104,8 +106,22 @@ pub struct MatrixInput<'a> {
     /// `NS_*` and `SOURCE_DATE_EPOCH`, applied before each build's own env.
     pub base_env: &'a [(String, String)],
     pub dist_dir: &'a Path,
+    pub root: &'a Path,
+    pub toolchain: ReleaseToolchain,
+    pub go_main: &'a Path,
+    pub go_ldflags: &'a [String],
+    pub go_cgo: bool,
 }
 
+fn go_platform(target: &str) -> Result<(&str, &str)> {
+    let (os, arch) = target
+        .split_once('/')
+        .with_context(|| format!("Go release target {target:?}: expected <goos>/<goarch>"))?;
+    if os.is_empty() || arch.is_empty() || arch.contains('/') {
+        bail!("Go release target {target:?}: expected <goos>/<goarch>");
+    }
+    Ok((os, arch))
+}
 impl MatrixInput<'_> {
     fn cargo_args(&self, build: &ReleaseBuild) -> Vec<String> {
         let mut args = vec![
@@ -147,22 +163,55 @@ impl MatrixInput<'_> {
     /// Build `build` for `target`, then copy the binary to
     /// `<dist>/<target>/<binary>[.exe]` before anything can rebuild it.
     fn build_one(&self, build: &ReleaseBuild, target: &str) -> Result<()> {
-        let status = self
-            .command(build, target)?
-            .status()
-            .context("spawn build")?;
-        if !status.success() {
-            bail!("exit status {status}");
+        let dest_dir = self.dist_dir.join(target);
+        std::fs::create_dir_all(&dest_dir)
+            .with_context(|| format!("create {}", dest_dir.display()))?;
+        let dest = dest_dir.join(exe_name(build.binary(), target));
+        if self.toolchain == ReleaseToolchain::Go {
+            let (goos, goarch) = go_platform(target)?;
+            let cache = crate::config::Settings::load()
+                .stores
+                .first()
+                .cloned()
+                .unwrap_or_else(|| self.root.join(".naspeed-go-cache"))
+                .join("go");
+            std::fs::create_dir_all(cache.join("build"))?;
+            let mut cmd = Command::new(std::env::var_os("GO").unwrap_or_else(|| "go".into()));
+            cmd.args(["build", "-trimpath", "-buildvcs=true"]);
+            if !self.go_ldflags.is_empty() {
+                cmd.args(["-ldflags", &self.go_ldflags.join(" ")]);
+            }
+            let status = cmd
+                .arg("-o")
+                .arg(&dest)
+                .arg(self.go_main)
+                .current_dir(self.root)
+                .env("GOOS", goos)
+                .env("GOARCH", goarch)
+                .env("CGO_ENABLED", if self.go_cgo { "1" } else { "0" })
+                .env("GOCACHE", cache.join("build"))
+                .envs(self.base_env.iter().map(|(k, v)| (k, v)))
+                .envs(&build.config.env)
+                .status()
+                .context("spawn go build")?;
+            if !status.success() {
+                bail!("go build exited with {status}");
+            }
+        } else {
+            let status = self
+                .command(build, target)?
+                .status()
+                .context("spawn build")?;
+            if !status.success() {
+                bail!("exit status {status}");
+            }
+            let built = output_dir(self.target_dir, target, self.profile)
+                .join(exe_name(&build.config.bin, target));
+            if !built.is_file() {
+                bail!("build did not produce {}", built.display());
+            }
+            std::fs::copy(&built, &dest).with_context(|| format!("copy {}", built.display()))?;
         }
-        let built = output_dir(self.target_dir, target, self.profile)
-            .join(exe_name(&build.config.bin, target));
-        if !built.is_file() {
-            bail!("build did not produce {}", built.display());
-        }
-        let dir = self.dist_dir.join(target);
-        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-        let dest = dir.join(exe_name(build.binary(), target));
-        std::fs::copy(&built, &dest).with_context(|| format!("copy {}", built.display()))?;
         crate::platform::set_mode(&dest, 0o755).with_context(|| format!("chmod {}", dest.display()))
     }
 }

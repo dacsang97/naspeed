@@ -42,7 +42,8 @@ pub enum CacheCommand {
 #[derive(Debug, Args)]
 pub struct CacheExportArgs {
     pub dir: PathBuf,
-    /// Size cap for the exported objects, in GB (GitHub allows 10 GB per repo).
+    /// Total exported transfer cap in GB, shared by naspeed objects and the
+    /// auxiliary Go build/module cache.
     #[arg(long, default_value_t = 5.0)]
     pub max_gb: f64,
     /// Store to read; default: the configured store on the same volume as `<dir>`.
@@ -72,7 +73,8 @@ pub fn run(cmd: CacheCommand) -> Result<u8> {
             let start = std::time::Instant::now();
             crate::ui_info!("exporting store"; store = root.display(), dir = args.dir.display());
             let _export = crate::ui::indent();
-            export::run(&root, &args.dir, cap, settings.cow_mode)?;
+            let native_bytes = export::run(&root, &args.dir, cap, settings.cow_mode)?;
+            export_aux_caches(&root, &args.dir, cap.saturating_sub(native_bytes))?;
             crate::ui::took(start);
         }
         CacheCommand::Import(args) => {
@@ -87,6 +89,7 @@ pub fn run(cmd: CacheCommand) -> Result<u8> {
             crate::ui_info!("importing store"; dir = args.dir.display(), store = root.display());
             let _import = crate::ui::indent();
             import::run(&root, &args.dir, settings.cow_mode)?;
+            import_aux_caches(&args.dir, &root)?;
             crate::ui::took(start);
         }
         CacheCommand::Serve(args) => return super::cache_peer::serve(&settings, args),
@@ -136,6 +139,87 @@ fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
             _ => {}
         }
     }
+}
+
+const AUX_CACHE_DIRS: &[&str] = &["go/build", "oci/buildkit"];
+
+/// Export newest build-cache files globally across every auxiliary family.
+/// Whole files are selected within `cap`; stale transfer files are pruned.
+fn export_aux_caches(store: &Path, transfer: &Path, cap: u64) -> Result<u64> {
+    let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for rel in AUX_CACHE_DIRS {
+        let source = store.join(rel);
+        let mut found = Vec::new();
+        walk_files(&source, &mut found);
+        for src in found {
+            let suffix = src
+                .strip_prefix(&source)
+                .context("relative auxiliary cache path")?
+                .to_path_buf();
+            files.push((src, PathBuf::from(rel).join(suffix)));
+        }
+    }
+    files.sort_by(|(a, ar), (b, br)| {
+        let modified = |p: &Path| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH)
+        };
+        modified(b).cmp(&modified(a)).then_with(|| ar.cmp(br))
+    });
+    let mut used = 0u64;
+    let mut keep = std::collections::BTreeSet::new();
+    for (src, rel) in files {
+        let size = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(u64::MAX);
+        if cap == 0 || size > cap.saturating_sub(used) {
+            continue;
+        }
+        let dst = transfer.join(&rel);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if !std::fs::metadata(&dst).is_ok_and(|m| m.len() == size) {
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("copy auxiliary cache {}", src.display()))?;
+        }
+        used += size;
+        keep.insert(dst);
+    }
+    for rel in AUX_CACHE_DIRS {
+        let mut old = Vec::new();
+        walk_files(&transfer.join(rel), &mut old);
+        for path in old {
+            if !keep.contains(&path) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    Ok(used)
+}
+
+/// Import is a merge: restored files fill misses but never delete or overwrite
+/// local cache entries created after the transfer was saved.
+fn import_aux_caches(transfer: &Path, store: &Path) -> Result<()> {
+    for rel in AUX_CACHE_DIRS {
+        let source = transfer.join(rel);
+        let mut files = Vec::new();
+        walk_files(&source, &mut files);
+        for src in files {
+            let suffix = src
+                .strip_prefix(&source)
+                .context("relative auxiliary cache path")?;
+            let dst = store.join(rel).join(suffix);
+            if dst.exists() {
+                continue;
+            }
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("import auxiliary cache {}", src.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// File stem of a store file (`<hash>` or `<hash>.json`) if it is a valid name.
@@ -206,5 +290,98 @@ mod tests {
             .map(|e| e.file_name())
             .collect();
         assert_eq!(names.len(), 1);
+    }
+
+    #[test]
+    fn auxiliary_export_honors_shared_cap_and_prunes() {
+        let store = tempfile::tempdir().unwrap();
+        let transfer = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(store.path().join("go/build")).unwrap();
+        std::fs::create_dir_all(store.path().join("oci/buildkit")).unwrap();
+        std::fs::create_dir_all(store.path().join("go/mod/cache/vcs")).unwrap();
+        std::fs::write(store.path().join("go/build/a"), b"1234").unwrap();
+        std::fs::write(store.path().join("oci/buildkit/b"), b"5678").unwrap();
+        std::fs::write(
+            store.path().join("go/mod/cache/vcs/config"),
+            b"credential-must-not-export",
+        )
+        .unwrap();
+        std::fs::create_dir_all(transfer.path().join("go/build")).unwrap();
+        std::fs::write(transfer.path().join("go/build/stale"), b"old").unwrap();
+        assert_eq!(
+            export_aux_caches(store.path(), transfer.path(), 0).unwrap(),
+            0
+        );
+        assert!(
+            transfer
+                .path()
+                .join("go/build")
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert_eq!(
+            export_aux_caches(store.path(), transfer.path(), 8).unwrap(),
+            8
+        );
+        assert_eq!(
+            std::fs::read(transfer.path().join("go/build/a")).unwrap(),
+            b"1234"
+        );
+        assert_eq!(
+            std::fs::read(transfer.path().join("oci/buildkit/b")).unwrap(),
+            b"5678"
+        );
+        assert!(!transfer.path().join("go/mod").exists());
+    }
+
+    #[test]
+    fn auxiliary_import_merges_without_pruning_local_files() {
+        let transfer = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(transfer.path().join("oci/buildkit")).unwrap();
+        std::fs::create_dir_all(store.path().join("go/build")).unwrap();
+        std::fs::write(transfer.path().join("oci/buildkit/restored"), b"cache").unwrap();
+        std::fs::write(store.path().join("go/build/local-newer"), b"keep").unwrap();
+        import_aux_caches(transfer.path(), store.path()).unwrap();
+        assert_eq!(
+            std::fs::read(store.path().join("oci/buildkit/restored")).unwrap(),
+            b"cache"
+        );
+        assert_eq!(
+            std::fs::read(store.path().join("go/build/local-newer")).unwrap(),
+            b"keep"
+        );
+    }
+
+    #[test]
+    fn complete_transfer_never_exceeds_cap() {
+        use crate::config::CowMode;
+        use crate::store::Store;
+
+        let root = tempfile::tempdir().unwrap();
+        let transfer = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path(), CowMode::Auto).unwrap();
+        std::fs::create_dir_all(store.memo_dir()).unwrap();
+        std::fs::write(store.memo_dir().join("memo"), b"1234").unwrap();
+        std::fs::create_dir_all(root.path().join("go/build")).unwrap();
+        std::fs::create_dir_all(root.path().join("oci/buildkit")).unwrap();
+        std::fs::write(root.path().join("go/build/go"), b"5678").unwrap();
+        std::fs::write(root.path().join("oci/buildkit/image"), b"abcd").unwrap();
+
+        let cap = 8;
+        let native = export::run(root.path(), transfer.path(), cap, CowMode::Auto).unwrap();
+        export_aux_caches(root.path(), transfer.path(), cap - native).unwrap();
+        let mut files = Vec::new();
+        walk_files(transfer.path(), &mut files);
+        let bytes: u64 = files
+            .iter()
+            .map(|p| std::fs::metadata(p).unwrap().len())
+            .sum();
+        assert!(
+            bytes <= cap,
+            "transferred {bytes} bytes over {cap}-byte cap"
+        );
     }
 }

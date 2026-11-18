@@ -83,59 +83,68 @@ fn prune(dir: &Path, keep: &HashSet<PathBuf>) -> usize {
         .count()
 }
 
-/// Mirror the store's memo dir (small text files) into `<dir>/memo`.
-fn mirror_memo(store: &Store, out: &Store) -> Result<usize> {
-    let mut files = Vec::new();
-    walk_files(&store.memo_dir(), &mut files);
-    let mut keep = HashSet::new();
-    for src in files {
-        let Ok(rel) = src.strip_prefix(store.memo_dir()) else {
+/// Select memo and cached-test files newest-first within `cap`. Test file
+/// names remain validated; writer temp files are ignored.
+fn mirror_small_caches(store: &Store, out: &Store, cap: u64) -> Result<(u64, usize, usize)> {
+    let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut memo = Vec::new();
+    walk_files(&store.memo_dir(), &mut memo);
+    for src in memo {
+        let Ok(rel) = src.strip_prefix(store.memo_dir()).map(Path::to_path_buf) else {
             continue;
         };
         if rel
             .file_name()
             .is_some_and(|n| n.to_string_lossy().starts_with('.'))
         {
-            continue; // a writer's temp file
+            continue;
         }
-        let dst = out.memo_dir().join(rel);
+        candidates.push((src, out.memo_dir().join(rel)));
+    }
+    let mut tests = Vec::new();
+    walk_files(&store.tests_dir(), &mut tests);
+    for src in tests {
+        let Some(key) = hex_stem(&src) else { continue };
+        candidates.push((src, out.test_result_path(&key)));
+    }
+    candidates.sort_by(|(a, _), (b, _)| {
+        let modified = |p: &Path| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH)
+        };
+        modified(b).cmp(&modified(a)).then_with(|| a.cmp(b))
+    });
+    let mut used = 0u64;
+    let mut keep = HashSet::new();
+    let mut test_results = 0;
+    for (src, dst) in candidates {
+        let size = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(u64::MAX);
+        if cap == 0 || size > cap.saturating_sub(used) {
+            continue;
+        }
         let bytes = std::fs::read(&src).with_context(|| format!("read {}", src.display()))?;
         if std::fs::read(&dst).ok().as_deref() != Some(bytes.as_slice()) {
             write_atomic(&dst, &bytes)?;
         }
-        keep.insert(dst);
-    }
-    Ok(prune(&out.memo_dir(), &keep))
-}
-
-/// Mirror cached test results (`ns test`), so CI runs replay unchanged tests.
-fn mirror_tests(store: &Store, out: &Store) -> Result<(usize, usize)> {
-    let mut files = Vec::new();
-    walk_files(&store.tests_dir(), &mut files);
-    let mut keep = HashSet::new();
-    for src in files {
-        let Some(key) = hex_stem(&src) else {
-            continue;
-        };
-        let dst = out.test_result_path(&key);
-        if !dst.exists() {
-            let bytes = std::fs::read(&src).with_context(|| format!("read {}", src.display()))?;
-            write_atomic(&dst, &bytes)?;
+        used += size;
+        if dst.starts_with(out.tests_dir()) {
+            test_results += 1;
         }
         keep.insert(dst);
     }
-    Ok((keep.len(), prune(&out.tests_dir(), &keep)))
+    let pruned = prune(&out.memo_dir(), &keep) + prune(&out.tests_dir(), &keep);
+    Ok((used, test_results, pruned))
 }
 
-pub fn run(root: &Path, dir: &Path, cap: u64, cow_mode: CowMode) -> Result<()> {
+pub fn run(root: &Path, dir: &Path, cap: u64, cow_mode: CowMode) -> Result<u64> {
     let store = Store::open(root, cow_mode)?;
     // Exclusive: the usage log is folded into the index (for last_used) and
     // no wrapper can be half-way through writing an entry we would copy.
     let _lock = store.exclusive_lock().context("lock store")?;
-    let out = Store {
-        root: dir.to_path_buf(),
-        cow_mode,
-    };
+    // Always create a recognizable transfer layout, including for Go/image-
+    // only stores with no native entries.
+    let out = Store::open(dir, cow_mode)?;
     // Export files must never share an inode with store objects.
     let copy_mode = match cow_mode {
         CowMode::Hardlink => CowMode::Auto,
@@ -144,6 +153,7 @@ pub fn run(root: &Path, dir: &Path, cap: u64, cow_mode: CowMode) -> Result<()> {
 
     let mut report = ExportReport::default();
     let mut objects: HashMap<String, u64> = HashMap::new();
+    let mut manifests = HashSet::new();
     let mut selected: Vec<(Entry, Vec<u8>, i64)> = Vec::new();
     for (entry, bytes, last_used) in entries_by_recency(&store)? {
         let mut new: HashMap<&str, u64> = HashMap::new();
@@ -152,8 +162,18 @@ pub fn run(root: &Path, dir: &Path, cap: u64, cow_mode: CowMode) -> Result<()> {
                 new.insert(&o.object, o.size);
             }
         }
-        // Entry JSON counts too, so the cap bounds the whole export.
-        let new_bytes: u64 = new.values().sum::<u64>() + bytes.len() as u64;
+        // Keep every native entry complete: its new objects, entry JSON,
+        // manifest (once), and last-used row are selected atomically.
+        let object_bytes: u64 = new.values().sum();
+        let manifest_bytes = if manifests.contains(&entry.tier1) {
+            0
+        } else {
+            std::fs::metadata(store.manifest_path(&entry.tier1))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        };
+        let last_used_bytes = format!("{}\t{last_used}\n", entry.key).len() as u64;
+        let new_bytes = object_bytes + bytes.len() as u64 + manifest_bytes + last_used_bytes;
         let complete = entry.outputs.iter().all(|o| {
             std::fs::metadata(store.object_path(&o.object)).is_ok_and(|m| m.len() == o.size)
         });
@@ -162,7 +182,8 @@ pub fn run(root: &Path, dir: &Path, cap: u64, cow_mode: CowMode) -> Result<()> {
             continue;
         }
         report.bytes += new_bytes;
-        report.object_bytes += new_bytes - bytes.len() as u64;
+        report.object_bytes += object_bytes;
+        manifests.insert(entry.tier1.clone());
         objects.extend(new.into_iter().map(|(k, v)| (k.to_owned(), v)));
         selected.push((entry, bytes, last_used));
     }
@@ -205,9 +226,10 @@ pub fn run(root: &Path, dir: &Path, cap: u64, cow_mode: CowMode) -> Result<()> {
     report.pruned = prune(&out.entries_dir(), &keep_entries)
         + prune(&out.manifests_dir(), &keep_manifests)
         + prune(&out.objects_dir(), &keep_objects);
-    report.pruned += mirror_memo(&store, &out)?;
-    let (test_results, pruned_tests) = mirror_tests(&store, &out)?;
-    report.pruned += pruned_tests;
+    let (small_bytes, test_results, pruned_small) =
+        mirror_small_caches(&store, &out, cap.saturating_sub(report.bytes))?;
+    report.bytes += small_bytes;
+    report.pruned += pruned_small;
 
     crate::ui_info!(format!("exported {} entries", report.entries);
         objects = objects.len(), size = human(report.object_bytes));
@@ -221,5 +243,5 @@ pub fn run(root: &Path, dir: &Path, cap: u64, cow_mode: CowMode) -> Result<()> {
     if test_results > 0 {
         crate::ui_info!(format!("exported {test_results} cached test results"));
     }
-    Ok(())
+    Ok(report.bytes)
 }
