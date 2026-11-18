@@ -7,7 +7,7 @@ export default defineConfig({
   lang: 'en-US',
   title: 'naspeed',
   description:
-    'Transparent RUSTC_WRAPPER: a content-addressed crate store cloned copy-on-write into every target/ dir, machine-wide rustc slots, and the ns project front-end.',
+    'Fast Rust builds and selective Cargo and Go dev loops: a content-addressed crate store, copy-on-write restores, machine-wide rustc slots, and the ns project front-end.',
   base,
 
   // Examples reference tailnet and localhost peers that are not navigable

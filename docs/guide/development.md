@@ -115,9 +115,9 @@ src/setup        ~/.cargo/config.toml edits and shell env check
 src/commands     naspeed subcommands (status, stats, gc, purge, build, cache …)
 src/cross        zig linker shims and msvc SDK
 src/remote       peer cache client and server
-src/project      ns.toml and workspace graph
-src/dev          ns dev
-src/testcache    ns test result cache
+src/project      ns.toml and Cargo workspace graph
+src/dev          ns dev toolchain selection, Cargo/Go graphs, watcher, build/test cycle, process supervision and TUI
+src/testcache    ns test result cache (Cargo)
 src/release      ns release
 src/image        ns image (OCI)
 src/ci           ns ci init

@@ -8,7 +8,8 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use super::DevArgs;
-use crate::project::ns_config::LogDir;
+use super::toolchain::DevToolchain;
+use crate::project::ns_config::{DevConfig, LogDir};
 use crate::project::{Project, WorkspaceGraph};
 
 pub struct Settings {
@@ -23,6 +24,12 @@ pub struct Settings {
     /// File output directory; `None` disables logging.
     pub log_dir: Option<PathBuf>,
     pub tui: TuiMode,
+    /// Toolchain-specific directory names pruned before traversal.
+    pub skipped_dirs: Vec<String>,
+    /// Whether Go module roots should follow `go.work` graph reloads.
+    pub go_auto_watch: bool,
+    /// Non-fatal startup diagnostics emitted after the log bus exists.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +48,13 @@ pub enum TuiMode {
 }
 
 impl Settings {
+    pub fn resolve_toolchain(args: DevArgs, toolchain: &DevToolchain) -> Result<Settings> {
+        match toolchain {
+            DevToolchain::Cargo(cargo) => Self::resolve(args, &cargo.project),
+            DevToolchain::Go(go) => Self::resolve_go(args, go),
+        }
+    }
+
     pub fn resolve(args: DevArgs, project: &Project) -> Result<Settings> {
         let DevArgs {
             bin: cli_bins,
@@ -61,14 +75,12 @@ impl Settings {
         if !cli_args.is_empty() && bins.len() != 1 {
             bail!("arguments after -- require exactly one selected binary");
         }
-        let mut cli_args = (!cli_args.is_empty()).then_some(cli_args);
         for name in cfg.apps.keys() {
             if graph.bin_owner(name).is_none() {
                 bail!("[dev.apps.{name}] does not name a workspace binary");
             }
         }
         let root = graph.root.clone();
-        let mut used_ports = BTreeMap::new();
         let mut watch_files: Vec<PathBuf> = [
             "Cargo.toml",
             "Cargo.lock",
@@ -77,45 +89,12 @@ impl Settings {
         ]
         .map(PathBuf::from)
         .into();
-        let apps = bins
-            .into_iter()
-            .map(|bin| {
-                let owner = graph
-                    .bin_owner(&bin)
-                    .with_context(|| format!("no workspace binary named {bin:?}"))?
-                    .name
-                    .clone();
-                let override_cfg = cfg.apps.get(&bin);
-                let env_file = override_cfg
-                    .and_then(|app| app.env_file.clone())
-                    .or_else(|| cfg.env_file.clone());
-                if let Some(path) = &env_file
-                    && !watch_files.contains(path)
-                {
-                    watch_files.push(path.clone());
-                }
-                let ports = override_cfg
-                    .and_then(|app| app.ports.clone())
-                    .unwrap_or_else(|| cfg.ports.clone());
-                for port in &ports {
-                    if let Some(other) = used_ports.insert(*port, bin.clone()) {
-                        bail!("port {port} is assigned to both {other} and {bin}");
-                    }
-                }
-                let app_args = cli_args.take().unwrap_or_else(|| {
-                    override_cfg
-                        .and_then(|app| app.args.clone())
-                        .unwrap_or_else(|| cfg.args.clone())
-                });
-                Ok(AppSettings {
-                    bin,
-                    owner,
-                    args: app_args,
-                    env_file: env_file.map(|path| root.join(path)),
-                    ports,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let apps = resolve_apps(bins, cfg, &root, &mut watch_files, cli_args, |bin| {
+            graph
+                .bin_owner(bin)
+                .with_context(|| format!("no workspace binary named {bin:?}"))
+                .map(|owner| owner.name.clone())
+        })?;
         let watch_dirs = if cfg.watch.is_empty() {
             graph
                 .members
@@ -148,6 +127,9 @@ impl Settings {
             watch_files,
             ignore,
             log_dir,
+            skipped_dirs: vec!["target*".into()],
+            go_auto_watch: false,
+            warnings: Vec::new(),
             tui: if no_tui {
                 TuiMode::Disabled
             } else {
@@ -156,6 +138,138 @@ impl Settings {
             root,
         })
     }
+    fn resolve_go(args: DevArgs, go: &super::go_dev::GoDev) -> Result<Settings> {
+        let DevArgs {
+            bin: cli_bins,
+            all,
+            no_tui,
+            test,
+            args: cli_args,
+        } = args;
+        let cfg = &go.config.dev;
+        if cfg.bin.is_some() && !cfg.bins.is_empty() {
+            bail!("ns.toml cannot set both [dev].bin and [dev].bins");
+        }
+        if all && !cli_bins.is_empty() {
+            bail!("--all cannot be used with --bin");
+        }
+        let bins = resolve_bin_names(
+            go.graph.bin_names(),
+            cli_bins,
+            all,
+            cfg.bin.as_deref(),
+            &cfg.bins,
+        )?;
+        if !cli_args.is_empty() && bins.len() != 1 {
+            bail!("arguments after -- require exactly one selected binary");
+        }
+        for (name, app) in &cfg.apps {
+            go.graph.bin_owner(name, app.package.as_deref())?;
+        }
+        let root = go.graph.root().to_path_buf();
+        let mut watch_files = go.graph.watch_files();
+        let apps = resolve_apps(bins, cfg, &root, &mut watch_files, cli_args, |bin| {
+            go.graph.bin_owner(
+                bin,
+                cfg.apps.get(bin).and_then(|app| app.package.as_deref()),
+            )
+        })?;
+        let go_auto_watch = cfg.watch.is_empty();
+        let watch_dirs = if go_auto_watch {
+            go.graph.watch_dirs()
+        } else {
+            cfg.watch.clone()
+        };
+        let log_dir = match &cfg.log_dir {
+            LogDir::Enabled(false) => None,
+            LogDir::Enabled(true) => Some(root.join(".ns-dev/logs")),
+            LogDir::Path(path) => Some(root.join(path)),
+        };
+        if let Some(log_dir) = &log_dir {
+            validate_log_dir(log_dir, &root, &watch_dirs, &watch_files)?;
+        }
+        let mut ignore = cfg.ignore.clone();
+        if let Some(log_dir) = &log_dir {
+            for pattern in log_dir_ignore_patterns(&root, log_dir) {
+                if !ignore.contains(&pattern) {
+                    ignore.push(pattern);
+                }
+            }
+        }
+        let ignored = std::process::Command::new("git")
+            .args(["check-ignore", "-q", "--no-index", ".ns-dev/"])
+            .current_dir(&root)
+            .status()
+            .is_ok_and(|status| status.success());
+        let warnings = if ignored {
+            Vec::new()
+        } else {
+            vec![".ns-dev is not ignored by git; add it to .gitignore".to_string()]
+        };
+        Ok(Settings {
+            root,
+            apps,
+            test: test || cfg.test,
+            watch_dirs,
+            watch_files,
+            ignore,
+            log_dir,
+            tui: if no_tui {
+                TuiMode::Disabled
+            } else {
+                TuiMode::Auto
+            },
+            skipped_dirs: vec!["vendor".into(), "testdata".into(), ".ns-dev".into()],
+            go_auto_watch,
+            warnings,
+        })
+    }
+}
+
+fn resolve_apps(
+    bins: Vec<String>,
+    cfg: &DevConfig,
+    root: &Path,
+    watch_files: &mut Vec<PathBuf>,
+    cli_args: Vec<String>,
+    mut owner: impl FnMut(&str) -> Result<String>,
+) -> Result<Vec<AppSettings>> {
+    let mut used_ports = BTreeMap::new();
+    let mut cli_args = (!cli_args.is_empty()).then_some(cli_args);
+    bins.into_iter()
+        .map(|bin| {
+            let owner = owner(&bin)?;
+            let override_cfg = cfg.apps.get(&bin);
+            let env_file = override_cfg
+                .and_then(|app| app.env_file.clone())
+                .or_else(|| cfg.env_file.clone());
+            if let Some(path) = &env_file
+                && !watch_files.contains(path)
+            {
+                watch_files.push(path.clone());
+            }
+            let ports = override_cfg
+                .and_then(|app| app.ports.clone())
+                .unwrap_or_else(|| cfg.ports.clone());
+            for port in &ports {
+                if let Some(other) = used_ports.insert(*port, bin.clone()) {
+                    bail!("port {port} is assigned to both {other} and {bin}");
+                }
+            }
+            let app_args = cli_args.take().unwrap_or_else(|| {
+                override_cfg
+                    .and_then(|app| app.args.clone())
+                    .unwrap_or_else(|| cfg.args.clone())
+            });
+            Ok(AppSettings {
+                bin,
+                owner,
+                args: app_args,
+                env_file: env_file.map(|path| root.join(path)),
+                ports,
+            })
+        })
+        .collect()
 }
 
 fn validate_log_dir(
@@ -413,6 +527,47 @@ fn resolve_bins(
         }
         if graph.bin_owner(bin).is_none() {
             bail!("no workspace binary named {bin:?}");
+        }
+    }
+    Ok(bins)
+}
+
+fn resolve_bin_names(
+    available: Vec<String>,
+    cli_bins: Vec<String>,
+    all: bool,
+    legacy: Option<&str>,
+    configured: &[String],
+) -> Result<Vec<String>> {
+    let bins = if !cli_bins.is_empty() {
+        cli_bins
+    } else if all {
+        available.clone()
+    } else if !configured.is_empty() {
+        configured.to_vec()
+    } else if let Some(bin) = legacy {
+        vec![bin.to_string()]
+    } else {
+        match available.as_slice() {
+            [bin] => vec![bin.clone()],
+            [] => bail!("the project has no binary to run"),
+            many => bail!(
+                "the project has several binaries ({}); pick with --bin, --all or [dev].bins",
+                many.join(", ")
+            ),
+        }
+    };
+    if bins.is_empty() {
+        bail!("the project has no binary to run");
+    }
+    let available: std::collections::BTreeSet<String> = available.into_iter().collect();
+    let mut seen = std::collections::BTreeSet::new();
+    for bin in &bins {
+        if !seen.insert(bin) {
+            bail!("binary {bin:?} is selected more than once");
+        }
+        if !available.contains(bin) {
+            bail!("no project binary named {bin:?}");
         }
     }
     Ok(bins)

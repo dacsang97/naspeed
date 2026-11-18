@@ -1,10 +1,16 @@
 # naspeed
 
+**Fast builds. Simple dev loops.**
+
 A transparent `RUSTC_WRAPPER` for cargo. naspeed stores each compiled crate
 once per volume, in a content-addressed store, and clones it copy-on-write into
 every `target/` dir that needs it. A machine-wide slot pool with memory admission also caps how many
 `rustc` run at once. No daemon, no server, no `-Z` flags. If naspeed is unsure
 about a call, or anything fails, it runs `rustc` unchanged.
+
+The `ns` project front-end adds selective development loops for Cargo
+workspaces, Go modules, and `go.work`: it rebuilds and restarts only affected
+applications while failed builds leave the previous processes serving.
 
 Repository: <https://github.com/dacsang97/naspeed>
 Docs: <https://dacsang97.github.io/naspeed/>
@@ -49,7 +55,7 @@ Everything else lives in the [docs site](https://dacsang97.github.io/naspeed/)
 - [Commands](https://dacsang97.github.io/naspeed/guide/commands) —
   `status`, `stats`, `gc`, `purge`, `build`
 - [ns front-end](https://dacsang97.github.io/naspeed/guide/ns) —
-  `ns dev`, `ns test`, `ns check`, `ns fmt`, `ns release`, `ns image`, `ns ci init`, `ns.toml`
+  Cargo and Go `ns dev`; Cargo-only `ns test`, `ns check`, `ns fmt`, `ns release`, `ns image`, and `ns ci init`
 - [Test result cache](https://dacsang97.github.io/naspeed/guide/test-cache) and
   [Peer cache over Tailscale](https://dacsang97.github.io/naspeed/guide/peer-cache)
 - [GitHub Actions](https://dacsang97.github.io/naspeed/guide/github-actions) —

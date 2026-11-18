@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: naspeed
-  text: One crate store per volume
-  tagline: A transparent RUSTC_WRAPPER for cargo. Compiled crates are stored once and cloned copy-on-write into every target/ dir. No daemon, no server, no -Z flags.
+  text: Fast builds. Simple dev loops.
+  tagline: Share Rust build outputs across worktrees, then run selective Cargo and Go dev loops. No daemon, no server, no nightly flags.
   actions:
     - theme: brand
       text: Get started
@@ -20,6 +20,8 @@ features:
     details: A new worktree or project gets every shared dependency straight from the store, including the results of build scripts that compile C (jemalloc-sys, aws-lc-sys, ring).
   - title: Workspace crates
     details: Your own crates are cached too, keyed on the exact source files rustc read. Another worktree, a branch switch back or another agent at the same commit reuses them.
+  - title: Dev loops
+    details: ns dev watches Cargo workspaces, Go modules and go.work, then rebuilds and restarts only affected applications. A failed build leaves the previous processes serving.
   - title: Safety
     details: If naspeed is unsure about a call, or anything fails, it runs rustc (or the build script) unchanged.
 ---

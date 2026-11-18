@@ -1,8 +1,8 @@
-//! `ns dev`: check and build Rust changes once, then restart affected app groups.
+//! `ns dev`: build and restart affected applications in Cargo or Go projects.
 //!
-//! A failed check or build never stops a running app. Cargo is allowed to finish
-//! so incremental work is retained; changes received during a cycle are replayed.
-//! Every app, cargo and test process is stopped as a whole group on shutdown.
+//! A failed build never stops a running app. Changes received during a cycle
+//! are replayed, and every app, build and test process is stopped as a whole
+//! group on shutdown.
 
 mod affected_bins;
 mod affected_tests;
@@ -15,6 +15,9 @@ mod dev_restart;
 mod dev_settings;
 mod env_file;
 mod file_watcher;
+mod go_dev;
+mod go_list;
+mod go_test_runner;
 mod line_reader;
 mod log_bus;
 mod log_files;
@@ -22,6 +25,7 @@ mod plain_renderer;
 mod process_supervisor;
 mod status_line;
 mod target_gc;
+pub(crate) mod toolchain;
 mod tui;
 
 use std::io::IsTerminal;
@@ -37,20 +41,20 @@ use self::dev_settings::{Settings, TuiMode};
 use self::log_bus::{LogBus, Sink};
 use self::plain_renderer::PlainRenderer;
 use self::process_supervisor::{install_shutdown_handler, request_shutdown};
-use crate::project::Project;
+use self::toolchain::DevToolchain;
 
 #[derive(Debug, Args)]
 pub struct DevArgs {
-    /// Binary to run; repeat to select multiple workspace binaries.
+    /// Binary to run; repeat to select multiple project binaries.
     #[arg(long, action = clap::ArgAction::Append)]
     pub bin: Vec<String>,
-    /// Select every binary in the workspace.
+    /// Select every binary in the project.
     #[arg(long)]
     pub all: bool,
     /// Disable the interactive terminal interface.
     #[arg(long)]
     pub no_tui: bool,
-    /// Run tests of changed crates and their dependents after each clean build.
+    /// Run tests of changed packages and their dependents after each clean build.
     #[arg(long)]
     pub test: bool,
     /// Arguments passed to the only selected binary (after `--`); replace `[dev].args`.
@@ -59,8 +63,8 @@ pub struct DevArgs {
 }
 
 pub fn run(args: DevArgs) -> Result<u8> {
-    let project = Project::load_cwd()?;
-    let settings = Settings::resolve(args, &project)?;
+    let toolchain = DevToolchain::load_cwd()?;
+    let settings = Settings::resolve_toolchain(args, &toolchain)?;
     install_shutdown_handler()?;
     let bins: Vec<String> = settings.apps.iter().map(|app| app.bin.clone()).collect();
     let use_tui = settings.tui == TuiMode::Auto
@@ -84,12 +88,12 @@ pub fn run(args: DevArgs) -> Result<u8> {
         let (sink, events) = tui::tui_sink::channel();
         sinks.push(Box::new(sink));
         let router = log_bus::route(rx, sinks);
-        run_interactive(project, settings, bus.clone(), events, bins, router)?
+        run_interactive(toolchain, settings, bus.clone(), events, bins, router)?
     } else {
         sinks.push(Box::new(PlainRenderer::new(bins.len())));
         let router = log_bus::route(rx, sinks);
         let result = catch_unwind(AssertUnwindSafe(|| {
-            dev_loop::run_loop(project, settings, bus.clone(), None, false)
+            dev_loop::run_loop(toolchain, settings, bus.clone(), None, false)
         }));
         bus.shutdown();
         join_router(router)?;
@@ -105,7 +109,7 @@ pub fn run(args: DevArgs) -> Result<u8> {
 }
 
 fn run_interactive(
-    project: Project,
+    toolchain: DevToolchain,
     settings: Settings,
     bus: LogBus,
     events: mpsc::Receiver<log_bus::DevEvent>,
@@ -116,7 +120,13 @@ fn run_interactive(
     let loop_bus = bus.clone();
     let loop_thread = thread::spawn(move || {
         let result = catch_unwind(AssertUnwindSafe(|| {
-            dev_loop::run_loop(project, settings, loop_bus.clone(), Some(command_rx), true)
+            dev_loop::run_loop(
+                toolchain,
+                settings,
+                loop_bus.clone(),
+                Some(command_rx),
+                true,
+            )
         }));
         loop_bus.shutdown();
         result

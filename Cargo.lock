@@ -1063,6 +1063,7 @@ dependencies = [
  "dunce",
  "filetime",
  "flate2",
+ "globset",
  "ignore",
  "libc",
  "notify",

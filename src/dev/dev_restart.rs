@@ -14,7 +14,7 @@ use super::log_bus::AppState;
 use super::process_supervisor::{self, PORT_WAIT, STOP_GRACE, shutdown_requested};
 use super::status_line;
 
-impl DevLoop<'_> {
+impl DevLoop {
     pub(super) fn restart(&mut self, bins: &BTreeSet<String>, since_change: Instant) -> Result<()> {
         for bin in bins {
             let Some(slot) = self.apps.get_mut(bin) else {
@@ -40,10 +40,39 @@ impl DevLoop<'_> {
                 },
                 None => Vec::new(),
             };
+            if let Err(err) = self.toolchain.validate_staged_binary(bin, &binary) {
+                status_line::error(&self.bus, format!("{err:#}"));
+                continue;
+            }
+            let previous_binary = self.toolchain.final_binary_path(bin, &binary);
+            let was_running = slot.pid().is_some();
             if let Some(pid) = slot.pid() {
                 status_line::info(&self.bus, format!("stopping {bin} (pid {pid})"));
                 slot.stop(STOP_GRACE);
             }
+            let binary = match self.toolchain.finalize_binary(bin, &binary) {
+                Ok(binary) => {
+                    slot.binary = Some(binary.clone());
+                    binary
+                }
+                Err(err) => {
+                    status_line::error(&self.bus, format!("{err:#}"));
+                    if was_running && previous_binary.is_file() {
+                        slot.binary = Some(previous_binary.clone());
+                        if let Err(restart_error) =
+                            slot.start(&self.settings.root, previous_binary, env.clone())
+                        {
+                            status_line::error(
+                                &self.bus,
+                                format!(
+                                    "cannot restore {bin} after failed binary install: {restart_error:#}"
+                                ),
+                            );
+                        }
+                    }
+                    continue;
+                }
+            };
             for port in process_supervisor::wait_ports_free(&slot.settings.ports, PORT_WAIT) {
                 status_line::warn(
                     &self.bus,
@@ -152,7 +181,7 @@ impl DevLoop<'_> {
     }
 }
 
-impl Drop for DevLoop<'_> {
+impl Drop for DevLoop {
     fn drop(&mut self) {
         if let Some(tests) = self.tests.take() {
             tests.cancel();

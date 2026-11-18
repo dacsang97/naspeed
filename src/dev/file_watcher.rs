@@ -7,6 +7,7 @@
 use super::log_bus::LogBus;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant, SystemTime};
@@ -32,6 +33,8 @@ pub struct WatchFilter {
     /// Individual root-relative files watched outside `dirs` (Cargo.toml, .env...).
     files: Vec<PathBuf>,
     ignore: Gitignore,
+    extra_skipped: BTreeSet<OsString>,
+    skip_target_prefix: bool,
 }
 
 fn always_skipped(component: &Component) -> bool {
@@ -39,15 +42,26 @@ fn always_skipped(component: &Component) -> bool {
         return false;
     };
     let name = name.to_string_lossy();
-    name.starts_with("target") || name == ".git" || name == "node_modules"
+    name == ".git" || name == "node_modules"
 }
 
 impl WatchFilter {
+    #[cfg(test)]
     pub fn new(
         root: &Path,
         dirs: &[PathBuf],
         files: &[PathBuf],
         ignore_globs: &[String],
+    ) -> Result<WatchFilter> {
+        Self::new_with_skips(root, dirs, files, ignore_globs, &["target*".into()])
+    }
+
+    pub fn new_with_skips(
+        root: &Path,
+        dirs: &[PathBuf],
+        files: &[PathBuf],
+        ignore_globs: &[String],
+        extra_skipped: &[String],
     ) -> Result<WatchFilter> {
         let mut builder = GitignoreBuilder::new(root);
         let gitignore = root.join(".gitignore");
@@ -62,6 +76,7 @@ impl WatchFilter {
                 .with_context(|| format!("invalid [dev].ignore pattern {glob:?}"))?;
         }
         let ignore = builder.build().context("build ignore rules")?;
+        let skip_target_prefix = extra_skipped.iter().any(|name| name == "target*");
         let mut roots = vec![root.to_path_buf()];
         if let Ok(canonical) = root.canonicalize()
             && canonical != root
@@ -78,13 +93,23 @@ impl WatchFilter {
             dirs: dirs.iter().map(clean).collect(),
             files: files.iter().map(clean).collect(),
             ignore,
+            extra_skipped: extra_skipped.iter().map(OsString::from).collect(),
+            skip_target_prefix,
         })
     }
 
     /// The path relative to the root when a change to it should be acted on.
     pub fn relevant(&self, path: &Path) -> Option<PathBuf> {
         let rel = self.roots.iter().find_map(|r| path.strip_prefix(r).ok())?;
-        if rel.as_os_str().is_empty() || rel.components().any(|c| always_skipped(&c)) {
+        if rel.as_os_str().is_empty()
+            || rel.components().any(|component| {
+                always_skipped(&component)
+                    || matches!(component, Component::Normal(name)
+                        if self.extra_skipped.contains(name)
+                            || (self.skip_target_prefix
+                                && name.to_string_lossy().starts_with("target")))
+            })
+        {
             return None;
         }
         let explicitly_listed = self.files.iter().any(|file| file == rel);
@@ -427,6 +452,29 @@ mod tests {
         assert!(f.relevant(Path::new("/elsewhere/crates/a.rs")).is_none());
     }
 
+    #[test]
+    fn go_skips_do_not_hide_target_prefixed_packages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let filter = WatchFilter::new_with_skips(
+            root,
+            &[PathBuf::new()],
+            &[],
+            &[],
+            &["vendor".into(), "testdata".into(), ".ns-dev".into()],
+        )
+        .unwrap();
+        assert!(
+            filter
+                .relevant(&root.join("internal/targets/package.go"))
+                .is_some()
+        );
+        assert!(
+            filter
+                .relevant(&root.join("cmd/target-sync/main.go"))
+                .is_some()
+        );
+    }
     #[test]
     fn explicitly_watched_files_override_ignore_rules_but_not_always_skipped_dirs() {
         let tmp = tempfile::tempdir().unwrap();

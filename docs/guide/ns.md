@@ -1,17 +1,17 @@
 # ns front-end
 
 `setup` also creates `~/.cargo/bin/ns`, a symlink to naspeed. Through `ns`, the
-binary works as a project front-end that drives cargo for the dev loop,
-releases, container images and CI. It does not replace cargo: `cargo`,
-rust-analyzer and IDEs work as before and still go through the cache. Invoked
-as `ns`, the binary never enters wrapper mode, so a typo like `ns rustc` errors
-out instead of compiling.
+binary works as a project front-end. `ns dev` supports Cargo workspaces, Go
+modules and `go.work` workspaces; release, image, CI, check, format and cached
+test commands remain Cargo-only. It does not replace cargo or Go tooling.
+Invoked as `ns`, the binary never enters wrapper mode, so a typo like
+`ns rustc` errors out instead of compiling.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `ns dev [--bin B]… [--all] [--no-tui] [--test] [-- args]` | Watches, checks and builds once per Rust change, then restarts only affected application process groups. Failed checks/builds leave the old processes serving; changes during Cargo are queued. Interactive terminals get the searchable log TUI; pipes and `--no-tui` get prefixed plain output. See [`ns dev`](#ns-dev). |
+| `ns dev [--bin B]… [--all] [--no-tui] [--test] [-- args]` | Detects Cargo or Go, watches build inputs, builds once, then restarts only affected application process groups. Failed builds leave old processes serving; changes during builds are queued. Interactive terminals get the searchable log TUI; pipes and `--no-tui` get prefixed plain output. See [`ns dev`](#ns-dev). |
 | `ns fmt [--check] [cargo fmt args]` | `cargo fmt` over every package of the workspace; `--check` reports unformatted files instead of rewriting them. Packages whose `.rs` files are unchanged since they were last formatted cleanly are skipped (the record is in the store, keyed by rustfmt version and config, shared by all worktrees), so a repeat run takes a fraction of a second. `-p` narrows it (no cache), rustfmt flags go after `--`. |
 | `ns check [--fix] [--no-fmt] [clippy args]` | Format, lint and type check in one step: `cargo fmt --check`, then `cargo clippy --workspace --all-targets -- -D warnings`, both through the cache. Each step is reported and the command fails if either fails. `-p` or target flags narrow the clippy run, flags after `--` replace `-D warnings`, and `--fix` formats in place and applies clippy's automatic fixes. |
 | `ns test [--no-cache] [cargo test args] [-- test args]` | Runs `cargo test` with naspeed as the target runner; a test binary whose inputs did not change since it last passed replays that run's output (marked `(cached)` on stderr) instead of running. Failures are never cached, and every binary runs even after one fails (`--fail-fast` stops at the first, like plain cargo). It ends with what the run did: rustc hits and misses, test binaries replayed and run. `ns dev --test` goes through the same cache. See [Test result cache](./test-cache). |
@@ -28,7 +28,7 @@ binary can embed its version with `option_env!("NS_VERSION")`.
 ## `ns dev`
 
 `--bin` is repeatable and overrides configured selections. `--all` selects
-every workspace binary and cannot be combined with `--bin`. If neither is
+every project binary and cannot be combined with `--bin`. If neither is
 provided, `[dev].bins` is used; legacy `[dev].bin` remains supported. Arguments
 after `--` replace configured arguments and require exactly one selected bin.
 
@@ -50,15 +50,39 @@ env_file = ".env.worker"
 ```
 
 Global `args`, `env_file` and `ports` are defaults; `[dev.apps.<bin>]` overrides
-them per binary. Rust changes check and build the selected binaries once, then
-restart only apps whose package or dependency changed. Workspace-level manifest
-and lockfile changes affect every selected app. An app's own environment file
-restarts only that app; another watched non-Rust file restarts all selected
-apps. A failed check or build keeps existing processes alive, and Cargo is not
-interrupted for ordinary file changes. Files observed during the cycle run in
-the next cycle.
+them per binary. Source changes build the selected binaries once, then restart
+only apps whose package or dependency changed. Manifest changes affect every
+selected app. An app's own environment file restarts only that app; another
+watched runtime file restarts all selected apps. A failed build keeps existing
+processes alive. Files observed during the cycle run in the next cycle.
 
-While `ns dev` runs it keeps `target/` from growing without bound: cargo never
+### Go projects
+
+At startup `ns dev` uses `go.work` when `go env GOWORK` names one, otherwise
+the module containing `go.mod`. A `go.work` workspace requires Go 1.25 or newer.
+Main-package names come from the last import-path element (`cmd/api` is `api`).
+When two main packages have the same name, disambiguate the selected app:
+
+```toml
+[dev]
+toolchain = "go"
+bins = ["api"]
+
+[dev.apps.api]
+package = "example.com/service/cmd/api"
+```
+
+Go source, cgo and embedded-file changes rebuild only mains that import the
+changed package. `_test.go` changes run affected tests with `--test` but do not
+restart apps. `go.mod`, `go.sum`, `go.work`, `go.work.sum`, and a new package
+reload the package graph. Binaries and logs live under `.ns-dev/`, which should
+be gitignored. `vendor`, `testdata`, and `.ns-dev` are never watched.
+
+If Cargo and Go marker files coexist at the same project root, set
+`[dev].toolchain = "cargo"` or `"go"`. All commands except `ns dev` remain
+Cargo-only and return a direct error in a Go-only directory.
+
+For Cargo projects, `ns dev` keeps `target/` from growing without bound: cargo never
 deletes old artifacts on its own. Every cargo check and build it starts marks
 the units cargo reports, fresh ones included, as used. Five minutes after
 start and then every 30 minutes, a background thread runs the
@@ -70,19 +94,19 @@ newest variant of each crate is always kept, so at worst a variant that only
 those commands use and that has not been rebuilt for `store_max_age_days`
 (default 14) is rebuilt once. `NASPEED_NO_AUTO_GC=1` turns the thread off.
 
-`log_dir` defaults to `true`, writing `build.log` and one `<bin>.log` beneath
-`target/ns-dev`; a string selects another directory and `false` disables files.
-Each session truncates its files, strips ANSI controls, timestamps lines, and
-keeps one `.1` rotation after a log exceeds 50 MiB. `build.log` is reserved for
-the build pipeline; if an app name would collide with it or another assigned
-filename, `app-` is prefixed repeatedly until that session's name is unique.
+Session logs default to `target/ns-dev` for Cargo and `.ns-dev/logs` for Go; a
+string selects another directory and `false` disables files. Each session
+truncates its files, strips ANSI controls, timestamps lines, and keeps one `.1`
+rotation after a log exceeds 50 MiB. `build.log` is reserved for the build
+pipeline; if an app name would collide with it or another assigned filename,
+`app-` is prefixed repeatedly until that session's name is unique.
 
 An interactive stdin/stdout starts the TUI; `--no-tui` or redirected streams
 use plain output, with app lines prefixed by binary on stdout and status/build
 lines on stderr. With a single app its lines carry no `[bin]` prefix, in plain
-output, the TUI and copied text alike. cargo's own progress (`Checking`,
-`Compiling`, build-script warnings) streams as build lines while each check
-and build runs, so a cold workspace shows what it is compiling.
+output, the TUI and copied text alike. Cargo progress streams as build lines
+while a build runs. Go diagnostics are reported together when a build fails,
+so multi-line compiler and module hints remain intact.
 
 The TUI's header holds the tabs (All, one per bin, and build, which shows the
 compiler's and `--test` output and turns red when a build fails; click one, or
@@ -110,11 +134,12 @@ Terminal modes are restored on exit, Ctrl-C, SIGTERM and panic unwinding.
 
 ## `ns.toml`
 
-Optional; without it, defaults come from `cargo metadata`. Unknown keys are
-errors.
+Optional; without it, defaults come from the selected toolchain's project
+graph. Unknown keys are errors.
 
 ```toml
 [dev]
+toolchain = "cargo"                           # or "go"; required when both markers exist
 bin = "api"
 args = ["serve", "--port", "8317"]
 env_file = ".env"
