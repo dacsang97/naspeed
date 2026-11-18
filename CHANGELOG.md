@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/dacsang97/naspeed/compare/v0.10.1...v0.11.0) - 2026-11-18
+
+### Added
+
+- *(dev)* support Go projects ([#37](https://github.com/dacsang97/naspeed/pull/37))
+
+### Fixed
+
+- *(dev)* preserve selection while wheel scrolling ([#35](https://github.com/dacsang97/naspeed/pull/35))
+
 ### Added
 
 - *(dev)* watch, build, selectively restart and test Go modules and `go.work` workspaces
