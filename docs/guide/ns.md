@@ -169,6 +169,7 @@ cache = true                                 # false: always run
 env = ["DATABASE_URL"]                       # env vars the tests read (part of the key)
 inputs = ["testdata"]                        # extra files/dirs read at run time
 trace = true                                 # record what tests read at run time
+bins = "scoped"                              # key only on own-package bins (trace covers executed ones)
 exclude = ["docs/**"]                        # left out of untraced runs' workspace files
 
 [image]                                      # OCI image

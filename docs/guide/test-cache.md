@@ -20,7 +20,10 @@ Each test-binary run is keyed on:
 - the files of the package and of every workspace member it depends on
   (respecting `.gitignore`, without `.git` and the target dir);
 - every binary of the workspace in the profile dir, since an integration test
-  may run any of them (`CARGO_BIN_EXE_*`, or a path into `target/`);
+  may run any of them (`CARGO_BIN_EXE_*`, or a path into `target/`)
+  — with `[test].bins = "scoped"`, only the tested package's own binaries;
+  binaries the tracer sees a pass execute are recorded with it and re-checked
+  on replay instead
 - `Cargo.lock`, `.cargo/config.toml` and `.env` files (root and per member,
   even when gitignored);
 - `[test].inputs`.
@@ -59,8 +62,11 @@ capability lookups.
 When a run cannot be traced (a statically linked test binary), or a test
 starts a program the tracer cannot follow (macOS strips `DYLD_*` from
 SIP-protected programs such as `/bin/sh`), the pass is also keyed on every
-workspace file outside the packages, minus `[test].exclude`. That stays
-correct but re-runs on any such edit.
+workspace file outside the packages, minus `[test].exclude`. Under
+`[test].bins = "scoped"` such a pass additionally records every workspace
+binary of the profile dir and re-checks them on replay, since the trace
+cannot prove which binaries it executed. That stays correct but re-runs on
+any such edit.
 `NASPEED_TEST_TRACE=0` or `[test].trace = false` turns tracing off.
 
 ## Every failure in one run

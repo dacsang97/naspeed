@@ -28,7 +28,7 @@ pub struct PackageInputs {
     pub env_names: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TestPlan {
     pub store: PathBuf,
     pub workspace_root: PathBuf,
@@ -42,6 +42,10 @@ pub struct TestPlan {
     /// Every binary of the workspace: a test may run any of them.
     #[serde(default)]
     pub all_bins: Vec<String>,
+    /// `[test].bins`: whether test keys cover `all_bins` or only the tested
+    /// package's binaries (recorded executions still apply).
+    #[serde(default)]
+    pub bins: crate::project::ns_config::TestBinsMode,
     /// Member dirs, left out of the workspace-root files hashed for runs
     /// that could not be traced.
     #[serde(default)]
@@ -156,6 +160,7 @@ impl TestPlan {
             inputs,
             packages,
             all_bins,
+            bins: project.config.test.bins,
             member_dirs: graph
                 .members
                 .iter()
