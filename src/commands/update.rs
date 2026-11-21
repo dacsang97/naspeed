@@ -54,7 +54,7 @@ pub fn run(args: UpdateArgs) -> Result<u8> {
             // installed copy in ~/.cargo/bin may be this very process.
             #[cfg(windows)]
             if crate::platform::canonicalize(&std::env::current_exe()?)?
-                == crate::platform::canonicalize(&crate::setup::installed_binary())?
+                == crate::platform::canonicalize(crate::setup::installed_binary())?
             {
                 bail!(
                     "cargo cannot replace the running naspeed.exe — run `cargo install naspeed --locked` from another shell, then `naspeed setup`"
