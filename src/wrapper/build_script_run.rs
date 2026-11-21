@@ -21,6 +21,10 @@
 //! A hit empties `OUT_DIR`, restores the stored tree (clones; text files
 //! that name the target dir are rewritten) and replays the output. A miss
 //! also starts from an empty `OUT_DIR`, exactly like a fresh target dir.
+//! `OUT_DIR` mutation runs under `.naspeed-out.lock` in the unit dir: an
+//! orphaned launcher can otherwise empty the dir between a script's run
+//! and its snapshot, caching an empty tree whose output still advertises
+//! generated files. Entries that would serve such output are dropped.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -40,7 +44,8 @@ use crate::store::content_hash::{TEXT_LIMIT, hash_dir, hash_file};
 use crate::store::path_placeholders::{PROFILE_TOKEN, Placeholders};
 use crate::store::usage_log::Record;
 use crate::store::{
-    DepInfoFile, ENTRY_VERSION, Entry, Manifest, OutputFile, Store, cow_copy, now_secs, volume_root,
+    DepInfoFile, ENTRY_VERSION, Entry, Manifest, OutputFile, Store, cow_copy, key_lock, now_secs,
+    volume_root,
 };
 
 pub const KEY_VERSION: &str = "naspeed-build-script-v2";
@@ -256,6 +261,67 @@ pub fn rerun_inputs(stdout: &str) -> Vec<String> {
     out
 }
 
+/// Every absolute path under `base` a `cargo:` directive mentions, so a
+/// hit can check that what it is about to advertise actually came back.
+/// Tokens end at whitespace and quotes: build-script env paths are plain,
+/// and a path glued to flag syntax (e.g. `rustc-link-arg=-L<dir>`) simply
+/// fails to parse here, which only ever means a refused cache, not a bad
+/// hit.
+fn paths_in_directives(stdout: &str, base: &Path) -> Vec<PathBuf> {
+    let base = base.to_string_lossy().into_owned();
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        let Some(rest) = line
+            .strip_prefix("cargo::")
+            .or_else(|| line.strip_prefix("cargo:"))
+        else {
+            continue;
+        };
+        // Warnings are free text; every other directive's value is consumed
+        // by cargo or a later rustc.
+        if rest.starts_with("warning") {
+            continue;
+        }
+        for (i, _) in rest.match_indices(&base) {
+            let end = rest[i..]
+                .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '\\'))
+                .map(|j| i + j)
+                .unwrap_or(rest.len());
+            let path = PathBuf::from(&rest[i..end]);
+            if path.starts_with(&base) && !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// `rel` comes back when the entry captured it or captured something
+/// below it, which makes the restore create `rel` as a directory.
+fn path_covered(entry: &Entry, rel: &Path) -> bool {
+    let captured = |name: &String| Path::new(name) == rel;
+    entry
+        .dirs
+        .iter()
+        .any(|d| captured(d) || Path::new(d).starts_with(rel))
+        || entry.outputs.iter().any(|o| captured(&o.name))
+        || entry.texts.iter().any(|t| captured(&t.name))
+        || entry.symlinks.iter().any(|(n, _)| captured(n))
+}
+
+/// `OUT_DIR` paths `stdout`'s `cargo:` lines advertise that `entry` does
+/// not capture. Replayed as-is, a hit would hand cargo paths to files
+/// that are not there, so such entries are never served.
+fn uncovered_refs(entry: &Entry, stdout: &str, out_dir: &Path) -> Vec<PathBuf> {
+    paths_in_directives(stdout, out_dir)
+        .into_iter()
+        .filter(|p| {
+            p.strip_prefix(out_dir)
+                .is_ok_and(|rel| !rel.as_os_str().is_empty() && !path_covered(entry, rel))
+        })
+        .collect()
+}
+
 impl<'a> Run<'a> {
     fn prepare(settings: &Settings, real: &'a Path, binary_hash: &str) -> Option<Run<'a>> {
         let env = current_env();
@@ -362,6 +428,17 @@ impl<'a> Run<'a> {
         let Ok(_shared) = self.store.shared_lock() else {
             return exec_real(self.real, args);
         };
+        // Only cargo knows whether two build-script runs share an OUT_DIR;
+        // they usually cannot run concurrently. A launcher orphaned by a
+        // killed cargo can outlive that guarantee, though, and its
+        // empty-dir/restore/snapshot mutates the dir lock-free (the tier-1
+        // key lock is per cache key, not per OUT_DIR). Serialized here so a
+        // second launcher's empty_dir cannot land between our script and
+        // our snapshot — the race that cached an empty tree whose replayed
+        // stdout still advertised generated files (also refused below).
+        let Ok(_out_lock) = self.out_lock() else {
+            return exec_real(self.real, args);
+        };
         if let Some(code) = self.try_hit() {
             return code;
         }
@@ -377,6 +454,18 @@ impl<'a> Run<'a> {
         self.run_and_store(args)
     }
 
+    /// Exclusive lock covering every mutation of `OUT_DIR`. The file lives
+    /// in the unit dir (not inside `out/`, which gets emptied).
+    fn out_lock(&self) -> std::io::Result<key_lock::FileLock> {
+        if let Some(unit) = self.out_dir.parent() {
+            std::fs::create_dir_all(unit)?;
+        }
+        key_lock::lock(
+            &self.out_dir.with_file_name(".naspeed-out.lock"),
+            key_lock::Mode::Exclusive,
+        )
+    }
+
     fn try_peer(&self) -> Option<i32> {
         let settings = Settings::load();
         let client = crate::remote::peer_client::PeerClient::new(&self.store, &settings)?;
@@ -388,13 +477,37 @@ impl<'a> Run<'a> {
         let manifest = self.store.read_manifest(&self.tier1)?;
         let key = self.tier2(&manifest.env_deps);
         let entry = self.store.read_entry(&key)?;
+        let stdout = self.placeholders.decode(&entry.stdout);
+        let uncovered = uncovered_refs(&entry, &stdout, &self.out_dir);
+        if !uncovered.is_empty() {
+            // The entry replays paths it never restores: stored from a run
+            // whose OUT_DIR was emptied before the snapshot. Replaying it
+            // breaks the dependent compile, so drop it and run the script.
+            warn!(
+                ?uncovered,
+                "build script entry cannot restore its advertised paths"
+            );
+            self.store.remove_entry(&key);
+            return None;
+        }
         let restore_started = std::time::Instant::now();
         if let Err(e) = self.restore(&entry) {
             warn!(out_dir = %self.out_dir.display(), "build script restore failed, running it: {e:#}");
             return None;
         }
+        let missing: Vec<_> = paths_in_directives(&stdout, &self.placeholders.profile_dir())
+            .into_iter()
+            .filter(|p| std::fs::symlink_metadata(p).is_err())
+            .collect();
+        if !missing.is_empty() {
+            warn!(
+                ?missing,
+                "build script replay advertises paths that are not there, running it"
+            );
+            return None;
+        }
         let mut out = std::io::stdout().lock();
-        let _ = out.write_all(self.placeholders.decode(&entry.stdout).as_bytes());
+        let _ = out.write_all(stdout.as_bytes());
         let _ = out.flush();
         let mut err = std::io::stderr().lock();
         let _ = err.write_all(self.placeholders.decode(&entry.stderr).as_bytes());
@@ -509,6 +622,14 @@ impl<'a> Run<'a> {
         };
         self.store.ensure_room(self.min_free_disk_pct)?;
         self.snapshot(&self.out_dir, &mut entry)?;
+        let uncovered = uncovered_refs(&entry, stdout, &self.out_dir);
+        if !uncovered.is_empty() {
+            // The script advertised files that are not in the tree we just
+            // captured: something emptied OUT_DIR between the run and the
+            // snapshot (or the script never wrote them). Storing the entry
+            // would replay those paths to a dir that lacks them.
+            bail!("OUT_DIR misses advertised paths {uncovered:?}");
+        }
         let key = self.tier2(&inputs);
         entry.key = key.clone();
         self.store
@@ -651,5 +772,72 @@ mod tests {
             build_script_run_profile(Path::new("/t/debug/deps/out")),
             None
         );
+    }
+
+    fn entry_with(outputs: &[&str], dirs: &[&str], stdout: &str) -> Entry {
+        Entry {
+            version: ENTRY_VERSION,
+            key: String::new(),
+            tier1: String::new(),
+            crate_name: String::new(),
+            outputs: outputs
+                .iter()
+                .map(|name| OutputFile {
+                    name: name.to_string(),
+                    object: String::new(),
+                    size: 0,
+                    mode: 0o644,
+                })
+                .collect(),
+            dep_info: None,
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+            created: 0,
+            texts: Vec::new(),
+            symlinks: Vec::new(),
+            dirs: dirs.iter().map(|d| d.to_string()).collect(),
+            compile_ms: 0,
+        }
+    }
+
+    #[test]
+    fn advertised_out_dir_paths_are_found() {
+        let out_dir = Path::new("/t/debug/build/p-0123456789abcdef/out");
+        let stdout = "cargo:rustc-env=G=/t/debug/build/p-0123456789abcdef/out/gen.rs\n\
+                      cargo:rustc-link-search=native=/t/debug/build/p-0123456789abcdef/out/lib\n\
+                      cargo:warning=see /t/debug/build/p-0123456789abcdef/out/nope.txt\n\
+                      cargo::metadata=inc=/t/elsewhere/out/x\n\
+                      plain /t/debug/build/p-0123456789abcdef/out/skip\n";
+        assert_eq!(
+            paths_in_directives(stdout, out_dir),
+            vec![
+                PathBuf::from("/t/debug/build/p-0123456789abcdef/out/gen.rs"),
+                PathBuf::from("/t/debug/build/p-0123456789abcdef/out/lib"),
+            ]
+        );
+    }
+
+    #[test]
+    fn uncovered_entry_is_the_poisoned_shape() {
+        let out_dir = Path::new("/t/debug/build/p-0123456789abcdef/out");
+        let stdout = "cargo:rustc-env=G=/t/debug/build/p-0123456789abcdef/out/gen.rs\n";
+        // The bug's signature: a file is advertised but nothing was captured.
+        let empty = entry_with(&[], &[], stdout);
+        assert_eq!(
+            uncovered_refs(&empty, stdout, out_dir),
+            vec![PathBuf::from(
+                "/t/debug/build/p-0123456789abcdef/out/gen.rs"
+            )]
+        );
+        // Captured file, or a file inside a captured dir: covered.
+        let full = entry_with(&["gen.rs"], &[], stdout);
+        assert!(uncovered_refs(&full, stdout, out_dir).is_empty());
+        let nested_stdout = stdout.replace("gen.rs", "sub/gen.rs");
+        let nested = entry_with(&["sub/gen.rs"], &["sub"], &nested_stdout);
+        assert!(uncovered_refs(&nested, &nested_stdout, out_dir).is_empty());
+        let dir_stdout =
+            "cargo:rustc-link-search=native=/t/debug/build/p-0123456789abcdef/out/sub\n";
+        let dir_entry = entry_with(&["sub/f.a"], &["sub"], dir_stdout);
+        assert!(uncovered_refs(&dir_entry, dir_stdout, out_dir).is_empty());
     }
 }
