@@ -78,13 +78,25 @@ jobs:
       # The integration suites run this commit's naspeed binary (cargo builds
       # it for them), so the tracer and wrapper under test are the PR's.
       - run: ns test --locked --lib --bins --test test_input_tracking --test dev_go_watch
-      # Windows also runs setup/uninstall and the wrapper end to end (store,
-      # restore into a second target dir, freshness) on the fixture
-      # workspace, whose registry crates the tests build offline.
-      - if: runner.os == 'Windows'
-        run: cargo fetch --locked --manifest-path tests/fixtures/sample_workspace/Cargo.toml
-      - if: runner.os == 'Windows'
-        run: ns test --locked --test setup_uninstall --test materialize_integration
+
+  # The Windows end-to-end suites (installer, store restore into a second
+  # target dir, freshness) in their own job so they overlap the main test
+  # job instead of adding a serial minute to it on the slowest runner.
+  test-windows-extras:
+    name: test-extras (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: dacsang97/naspeed-action@v1
+        with:
+          cache-key: test-windows-extras
+      # The fixture workspace's registry crates are built offline.
+      - run: cargo fetch --locked --manifest-path tests/fixtures/sample_workspace/Cargo.toml
+      - run: ns test --locked --test setup_uninstall --test materialize_integration
 
   package:
     name: package

@@ -57,6 +57,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # naspeed caches this release build instead of compiling every release
+      # unit cold. The store is saved when the caller is a push to main (the
+      # release.yml path) and simply not saved on manual dispatch retries.
+      # cargo-zigbuild shells out to cargo, so the wrapper covers the musl
+      # targets too.
+      - uses: dacsang97/naspeed-action@v1
+        with:
+          cache-key: release-${{ matrix.target }}
       - if: matrix.cargo == 'zigbuild'
         uses: mlugg/setup-zig@v2
         with:
