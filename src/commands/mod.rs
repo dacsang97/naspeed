@@ -11,3 +11,4 @@ pub mod setup;
 pub mod stats;
 pub mod status;
 pub mod uninstall;
+pub mod update;

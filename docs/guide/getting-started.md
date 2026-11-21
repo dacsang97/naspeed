@@ -44,6 +44,9 @@ Run it once per volume to add more stores; each `setup` keeps the earlier ones.
 
 `setup` copies the binary into `~/.cargo/bin`, so after `brew upgrade naspeed`
 or a new `cargo install`, run `naspeed setup` again to refresh that copy.
+`ns update` does both steps for you (it knows which channel you installed
+from), and `ns dev` prints a one-line `update available` notice when a newer
+release exists.
 
 `setup` does the following:
 

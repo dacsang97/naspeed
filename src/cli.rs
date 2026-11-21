@@ -28,6 +28,7 @@ const SUBCOMMANDS: &[&str] = &[
     "check",
     "fmt",
     "stats",
+    "update",
     "__test-run",
     "__warm-incremental",
 ];
@@ -98,6 +99,9 @@ pub enum Command {
     Release(crate::release::ReleaseArgs),
     /// Build and push a multi-arch OCI image from release binaries (no Docker daemon).
     Image(crate::image::ImageArgs),
+    /// Check for a new release and update through the channel naspeed was
+    /// installed with (Homebrew tap or cargo install).
+    Update(UpdateArgs),
     /// GitHub Actions workflow with the naspeed store cached.
     #[command(subcommand)]
     Ci(crate::ci::CiCommand),
@@ -127,6 +131,13 @@ pub enum Command {
     /// Cached run of a registry crate's build script (called by its launcher).
     #[command(name = "__build-script", hide = true)]
     BuildScript(BuildScriptArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// Only report whether an update exists and the command that would run.
+    #[arg(long)]
+    pub check: bool,
 }
 
 #[derive(Debug, Args)]
@@ -269,6 +280,7 @@ pub fn run(args: Vec<OsString>) -> Result<u8> {
         }
         Command::Purge(a) => commands::purge::run(a),
         Command::Dev(a) => crate::dev::run(a),
+        Command::Update(a) => commands::update::run(a),
         Command::Release(a) => crate::release::run(a),
         Command::Image(a) => crate::image::run(a),
         Command::Ci(c) => {
