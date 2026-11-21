@@ -176,6 +176,11 @@ impl MatrixInput<'_> {
                 .unwrap_or_else(|| self.root.join(".naspeed-go-cache"))
                 .join("go");
             std::fs::create_dir_all(cache.join("build"))?;
+            // Modules land in the store's go/mod too, so cache transfer picks
+            // up go/mod/cache/download (never go/mod/cache/vcs) and CI stops
+            // re-downloading every dependency on each release.
+            let mod_cache = cache.join("mod");
+            std::fs::create_dir_all(mod_cache.join("cache/download"))?;
             let mut cmd = Command::new(std::env::var_os("GO").unwrap_or_else(|| "go".into()));
             cmd.args(["build", "-trimpath", "-buildvcs=true"]);
             if !self.go_ldflags.is_empty() {
@@ -190,6 +195,7 @@ impl MatrixInput<'_> {
                 .env("GOARCH", goarch)
                 .env("CGO_ENABLED", if self.go_cgo { "1" } else { "0" })
                 .env("GOCACHE", cache.join("build"))
+                .env("GOMODCACHE", &mod_cache)
                 .envs(self.base_env.iter().map(|(k, v)| (k, v)))
                 .envs(&build.config.env)
                 .status()

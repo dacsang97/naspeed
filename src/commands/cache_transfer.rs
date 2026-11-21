@@ -161,7 +161,11 @@ fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-const AUX_CACHE_DIRS: &[&str] = &["go/build", "oci/buildkit"];
+/// `go/mod/cache/download` is the only module-cache subtree that is safe to
+/// carry: it holds checksummed public artifacts. `go/mod/cache/vcs` keeps the
+/// git clones (and their credentials for private modules) and must never
+/// leave the machine.
+const AUX_CACHE_DIRS: &[&str] = &["go/build", "go/mod/cache/download", "oci/buildkit"];
 
 /// One auxiliary-cache family's contribution to a transfer. Go-only projects
 /// have no native entries, so these numbers are the whole story for them.
@@ -388,9 +392,11 @@ mod tests {
         let transfer = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(store.path().join("go/build")).unwrap();
         std::fs::create_dir_all(store.path().join("oci/buildkit")).unwrap();
+        std::fs::create_dir_all(store.path().join("go/mod/cache/download/x/mod")).unwrap();
         std::fs::create_dir_all(store.path().join("go/mod/cache/vcs")).unwrap();
         std::fs::write(store.path().join("go/build/a"), b"1234").unwrap();
         std::fs::write(store.path().join("oci/buildkit/b"), b"5678").unwrap();
+        std::fs::write(store.path().join("go/mod/cache/download/x/m.zip"), b"zip!").unwrap();
         std::fs::write(
             store.path().join("go/mod/cache/vcs/config"),
             b"credential-must-not-export",
@@ -413,13 +419,15 @@ mod tests {
                 .next()
                 .is_none()
         );
-        let reports = export_aux_caches(store.path(), transfer.path(), 8).unwrap();
-        assert_eq!(reports.values().map(|r| r.bytes).sum::<u64>(), 8);
+        let reports = export_aux_caches(store.path(), transfer.path(), 12).unwrap();
+        assert_eq!(reports.values().map(|r| r.bytes).sum::<u64>(), 12);
         assert_eq!(reports["go/build"].files, 1);
         assert_eq!(reports["go/build"].bytes, 4);
         assert_eq!(reports["go/build"].bytes_new, 4);
+        assert_eq!(reports["go/mod/cache/download"].bytes, 4);
+        assert_eq!(reports["oci/buildkit"].bytes, 4);
         // Incremental: the same export again copies nothing.
-        let reports = export_aux_caches(store.path(), transfer.path(), 8).unwrap();
+        let reports = export_aux_caches(store.path(), transfer.path(), 12).unwrap();
         assert_eq!(reports.values().map(|r| r.bytes_new).sum::<u64>(), 0);
         assert_eq!(
             std::fs::read(transfer.path().join("go/build/a")).unwrap(),
@@ -429,7 +437,12 @@ mod tests {
             std::fs::read(transfer.path().join("oci/buildkit/b")).unwrap(),
             b"5678"
         );
-        assert!(!transfer.path().join("go/mod").exists());
+        // The module download cache travels; the VCS cache (credentials) never does.
+        assert_eq!(
+            std::fs::read(transfer.path().join("go/mod/cache/download/x/m.zip")).unwrap(),
+            b"zip!"
+        );
+        assert!(!transfer.path().join("go/mod/cache/vcs").exists());
     }
 
     #[test]
