@@ -78,7 +78,8 @@ pub fn run(cmd: CacheCommand) -> Result<u8> {
             crate::ui_info!("exporting store"; store = root.display(), dir = args.dir.display());
             let _export = crate::ui::indent();
             let native = export::run(&root, &args.dir, cap, settings.cow_mode)?;
-            let aux = export_aux_caches(&root, &args.dir, cap.saturating_sub(native.selected_bytes))?;
+            let aux =
+                export_aux_caches(&root, &args.dir, cap.saturating_sub(native.selected_bytes))?;
             for (family, report) in &aux {
                 if report.files > 0 {
                     crate::ui_info!(format!("aux {family}");
@@ -240,10 +241,7 @@ fn export_aux_caches(
 
 /// Import is a merge: restored files fill misses but never delete or overwrite
 /// local cache entries created after the transfer was saved.
-fn import_aux_caches(
-    transfer: &Path,
-    store: &Path,
-) -> Result<BTreeMap<&'static str, AuxReport>> {
+fn import_aux_caches(transfer: &Path, store: &Path) -> Result<BTreeMap<&'static str, AuxReport>> {
     let mut reports: BTreeMap<&'static str, AuxReport> = BTreeMap::new();
     for rel in AUX_CACHE_DIRS {
         let source = transfer.join(rel);
@@ -465,8 +463,7 @@ mod tests {
         std::fs::write(root.path().join("go/build/a"), b"12345").unwrap();
 
         let export_once = || {
-            let native =
-                export::run(root.path(), transfer.path(), 1 << 20, CowMode::Auto).unwrap();
+            let native = export::run(root.path(), transfer.path(), 1 << 20, CowMode::Auto).unwrap();
             let aux = export_aux_caches(
                 root.path(),
                 transfer.path(),
@@ -511,12 +508,7 @@ mod tests {
 
         let cap = 8;
         let native = export::run(root.path(), transfer.path(), cap, CowMode::Auto).unwrap();
-        export_aux_caches(
-            root.path(),
-            transfer.path(),
-            cap - native.selected_bytes,
-        )
-        .unwrap();
+        export_aux_caches(root.path(), transfer.path(), cap - native.selected_bytes).unwrap();
         let mut files = Vec::new();
         walk_files(transfer.path(), &mut files);
         let bytes: u64 = files
