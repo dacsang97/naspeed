@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/dacsang97/naspeed/compare/v0.12.2...v0.13.0) - 2026-11-21
+
+### Added
+
+- update notice in `ns dev` and an `ns update` command ([#49](https://github.com/dacsang97/naspeed/pull/49))
+- *(test)* [test].bins = "scoped" keys tests on own-package binaries only ([#46](https://github.com/dacsang97/naspeed/pull/46))
+
+### Fixed
+
+- *(test)* make the update-notice test survive version bumps ([#50](https://github.com/dacsang97/naspeed/pull/50))
+- *(store)* serialize OUT_DIR mutation and refuse entries that cannot restore their advertised paths ([#45](https://github.com/dacsang97/naspeed/pull/45))
+
 ## [0.12.2](https://github.com/dacsang97/naspeed/compare/v0.12.1...v0.12.2) - 2026-11-21
 
 ### Added
