@@ -294,9 +294,11 @@ mod tests {
 
     #[test]
     fn notice_mentions_the_channels_own_command() {
-        let n = notice(InstallMethod::Brew, "0.13.0").unwrap();
+        // A clearly future version: this test must survive every version bump.
+        let future = "99.0.0";
+        let n = notice(InstallMethod::Brew, future).unwrap();
         assert!(n.contains("brew upgrade dacsang97/tap/naspeed"));
-        assert!(n.contains("0.12.2 → 0.13.0"));
-        assert!(notice(InstallMethod::Cargo, "0.12.2").is_none());
+        assert!(n.contains(CURRENT) && n.contains(future));
+        assert!(notice(InstallMethod::Cargo, CURRENT).is_none());
     }
 }
