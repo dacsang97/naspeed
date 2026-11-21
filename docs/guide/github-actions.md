@@ -90,6 +90,14 @@ any entry for the same compiler, so a dependency bump still starts from a warm
 store. GitHub evicts the least recently used entries past 10 GB per
 repository; `cache-max-gb` (default 3) caps each exported store.
 
+Every export also writes `.naspeed/export-summary.json` into the exported
+directory: selected and newly copied bytes, per auxiliary family (`go/build`,
+`oci/buildkit`). A cache key is immutable, so a save always re-uploads the
+whole payload; the action reads that summary and skips re-saving when fewer
+than `save-min-delta-mb` (default 50) new bytes were copied, which stops a
+repo whose store barely changes from pushing a fresh multi-hundred-MB key on
+every default-branch run.
+
 With `cache-save: auto` (the default) only pushes to the default branch save
 the store. Pull requests, forks included, restore it but never write it, so a
 pull request cannot plant compiled artifacts that `main` builds or releases
@@ -134,6 +142,7 @@ puts naspeed on `PATH` without running `setup` or touching the cache.
 | `cache-key` | `naspeed` | Cache key prefix; use one per kind of job |
 | `cache-save` | `auto` | `auto` (pushes to the default branch only), `true` or `false` |
 | `cache-max-gb` | `3` | Size cap of the exported store |
+| `save-min-delta-mb` | `50` | Skip re-saving when the export copied fewer new MB than this; `0` always saves |
 | `token` | the job's `GITHUB_TOKEN` | Token used to look up naspeed releases |
 
 Outputs: `version` (installed naspeed version), `path` (binary path),
