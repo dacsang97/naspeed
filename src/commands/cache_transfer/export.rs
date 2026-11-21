@@ -29,6 +29,20 @@ struct ExportReport {
     pruned: usize,
 }
 
+/// What `run` selected and copied, for the caller's logs and the
+/// machine-readable export summary.
+#[derive(Debug, Default)]
+pub(crate) struct ExportOutcome {
+    /// Selected native bytes (entries, objects, memo, cached tests) — the
+    /// amount the shared cap subtracts.
+    pub selected_bytes: u64,
+    /// Object and small-cache bytes actually written into the transfer dir
+    /// this run (entry/manifest JSON is negligible and uncounted).
+    pub bytes_new: u64,
+    pub entries: usize,
+    pub entries_skipped: usize,
+}
+
 /// Every readable entry with its last use (index, else creation time).
 fn entries_by_recency(store: &Store) -> Result<Vec<(Entry, Vec<u8>, i64)>> {
     let mut conn = usage_log::open_index(&store.root)?;
@@ -84,8 +98,9 @@ fn prune(dir: &Path, keep: &HashSet<PathBuf>) -> usize {
 }
 
 /// Select memo and cached-test files newest-first within `cap`. Test file
-/// names remain validated; writer temp files are ignored.
-fn mirror_small_caches(store: &Store, out: &Store, cap: u64) -> Result<(u64, usize, usize)> {
+/// names remain validated; writer temp files are ignored. Returns
+/// `(selected bytes, bytes actually written, test results, pruned)`.
+fn mirror_small_caches(store: &Store, out: &Store, cap: u64) -> Result<(u64, u64, usize, usize)> {
     let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut memo = Vec::new();
     walk_files(&store.memo_dir(), &mut memo);
@@ -116,6 +131,7 @@ fn mirror_small_caches(store: &Store, out: &Store, cap: u64) -> Result<(u64, usi
         modified(b).cmp(&modified(a)).then_with(|| a.cmp(b))
     });
     let mut used = 0u64;
+    let mut written = 0u64;
     let mut keep = HashSet::new();
     let mut test_results = 0;
     for (src, dst) in candidates {
@@ -126,6 +142,7 @@ fn mirror_small_caches(store: &Store, out: &Store, cap: u64) -> Result<(u64, usi
         let bytes = std::fs::read(&src).with_context(|| format!("read {}", src.display()))?;
         if std::fs::read(&dst).ok().as_deref() != Some(bytes.as_slice()) {
             write_atomic(&dst, &bytes)?;
+            written += size;
         }
         used += size;
         if dst.starts_with(out.tests_dir()) {
@@ -134,10 +151,10 @@ fn mirror_small_caches(store: &Store, out: &Store, cap: u64) -> Result<(u64, usi
         keep.insert(dst);
     }
     let pruned = prune(&out.memo_dir(), &keep) + prune(&out.tests_dir(), &keep);
-    Ok((used, test_results, pruned))
+    Ok((used, written, test_results, pruned))
 }
 
-pub fn run(root: &Path, dir: &Path, cap: u64, cow_mode: CowMode) -> Result<u64> {
+pub fn run(root: &Path, dir: &Path, cap: u64, cow_mode: CowMode) -> Result<ExportOutcome> {
     let store = Store::open(root, cow_mode)?;
     // Exclusive: the usage log is folded into the index (for last_used) and
     // no wrapper can be half-way through writing an entry we would copy.
@@ -226,7 +243,7 @@ pub fn run(root: &Path, dir: &Path, cap: u64, cow_mode: CowMode) -> Result<u64> 
     report.pruned = prune(&out.entries_dir(), &keep_entries)
         + prune(&out.manifests_dir(), &keep_manifests)
         + prune(&out.objects_dir(), &keep_objects);
-    let (small_bytes, test_results, pruned_small) =
+    let (small_bytes, small_written, test_results, pruned_small) =
         mirror_small_caches(&store, &out, cap.saturating_sub(report.bytes))?;
     report.bytes += small_bytes;
     report.pruned += pruned_small;
@@ -243,5 +260,10 @@ pub fn run(root: &Path, dir: &Path, cap: u64, cow_mode: CowMode) -> Result<u64> 
     if test_results > 0 {
         crate::ui_info!(format!("exported {test_results} cached test results"));
     }
-    Ok(report.bytes)
+    Ok(ExportOutcome {
+        selected_bytes: report.bytes,
+        bytes_new: report.bytes_copied + small_written,
+        entries: report.entries,
+        entries_skipped: report.entries_skipped,
+    })
 }

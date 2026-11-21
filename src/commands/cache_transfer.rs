@@ -9,6 +9,8 @@
 //! <dir>/manifests/<2>/<tier1>.json  for the exported entries' tier-1 keys
 //! <dir>/memo/                       source-tree / toolchain memo (small)
 //! <dir>/last_used.tsv               `<key>\t<unix secs>`, keeps LRU order
+//! <dir>/.naspeed/export-summary.json  machine-readable export report; no
+//!                                     walker or prune touches `.naspeed/`
 //! ```
 //!
 //! Everything read from `<dir>` is untrusted input (a restored cache archive):
@@ -19,12 +21,14 @@
 mod export;
 mod import;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 
 use crate::config::Settings;
+use crate::store::physical_usage::human;
 use crate::store::volume_root;
 
 #[derive(Debug, Subcommand)]
@@ -73,8 +77,17 @@ pub fn run(cmd: CacheCommand) -> Result<u8> {
             let start = std::time::Instant::now();
             crate::ui_info!("exporting store"; store = root.display(), dir = args.dir.display());
             let _export = crate::ui::indent();
-            let native_bytes = export::run(&root, &args.dir, cap, settings.cow_mode)?;
-            export_aux_caches(&root, &args.dir, cap.saturating_sub(native_bytes))?;
+            let native = export::run(&root, &args.dir, cap, settings.cow_mode)?;
+            let aux =
+                export_aux_caches(&root, &args.dir, cap.saturating_sub(native.selected_bytes))?;
+            for (family, report) in &aux {
+                if report.files > 0 {
+                    crate::ui_info!(format!("aux {family}");
+                        size = human(report.bytes), files = report.files,
+                        new = human(report.bytes_new));
+                }
+            }
+            write_export_summary(&args.dir, &native, &aux)?;
             crate::ui::took(start);
         }
         CacheCommand::Import(args) => {
@@ -89,7 +102,14 @@ pub fn run(cmd: CacheCommand) -> Result<u8> {
             crate::ui_info!("importing store"; dir = args.dir.display(), store = root.display());
             let _import = crate::ui::indent();
             import::run(&root, &args.dir, settings.cow_mode)?;
-            import_aux_caches(&args.dir, &root)?;
+            let aux = import_aux_caches(&args.dir, &root)?;
+            for (family, report) in &aux {
+                if report.files > 0 {
+                    crate::ui_info!(format!("aux {family}");
+                        carried = human(report.bytes), files = report.files,
+                        new = human(report.bytes_new));
+                }
+            }
             crate::ui::took(start);
         }
         CacheCommand::Serve(args) => return super::cache_peer::serve(&settings, args),
@@ -143,10 +163,27 @@ fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 const AUX_CACHE_DIRS: &[&str] = &["go/build", "oci/buildkit"];
 
+/// One auxiliary-cache family's contribution to a transfer. Go-only projects
+/// have no native entries, so these numbers are the whole story for them.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub(crate) struct AuxReport {
+    /// Files selected for the transfer.
+    pub files: usize,
+    /// Selected (export) or carried (import) bytes.
+    pub bytes: u64,
+    /// Bytes actually copied; the rest was already identical at the
+    /// destination (incremental export) or already existed locally (import).
+    pub bytes_new: u64,
+}
+
 /// Export newest build-cache files globally across every auxiliary family.
 /// Whole files are selected within `cap`; stale transfer files are pruned.
-fn export_aux_caches(store: &Path, transfer: &Path, cap: u64) -> Result<u64> {
-    let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
+fn export_aux_caches(
+    store: &Path,
+    transfer: &Path,
+    cap: u64,
+) -> Result<BTreeMap<&'static str, AuxReport>> {
+    let mut files: Vec<(&'static str, PathBuf, PathBuf)> = Vec::new();
     for rel in AUX_CACHE_DIRS {
         let source = store.join(rel);
         let mut found = Vec::new();
@@ -156,10 +193,10 @@ fn export_aux_caches(store: &Path, transfer: &Path, cap: u64) -> Result<u64> {
                 .strip_prefix(&source)
                 .context("relative auxiliary cache path")?
                 .to_path_buf();
-            files.push((src, PathBuf::from(rel).join(suffix)));
+            files.push((rel, src, PathBuf::from(rel).join(suffix)));
         }
     }
-    files.sort_by(|(a, ar), (b, br)| {
+    files.sort_by(|(_, a, ar), (_, b, br)| {
         let modified = |p: &Path| {
             std::fs::metadata(p)
                 .and_then(|m| m.modified())
@@ -169,7 +206,8 @@ fn export_aux_caches(store: &Path, transfer: &Path, cap: u64) -> Result<u64> {
     });
     let mut used = 0u64;
     let mut keep = std::collections::BTreeSet::new();
-    for (src, rel) in files {
+    let mut reports: BTreeMap<&'static str, AuxReport> = BTreeMap::new();
+    for (family, src, rel) in files {
         let size = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(u64::MAX);
         if cap == 0 || size > cap.saturating_sub(used) {
             continue;
@@ -178,10 +216,14 @@ fn export_aux_caches(store: &Path, transfer: &Path, cap: u64) -> Result<u64> {
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let report = reports.entry(family).or_default();
         if !std::fs::metadata(&dst).is_ok_and(|m| m.len() == size) {
             std::fs::copy(&src, &dst)
                 .with_context(|| format!("copy auxiliary cache {}", src.display()))?;
+            report.bytes_new += size;
         }
+        report.files += 1;
+        report.bytes += size;
         used += size;
         keep.insert(dst);
     }
@@ -194,12 +236,13 @@ fn export_aux_caches(store: &Path, transfer: &Path, cap: u64) -> Result<u64> {
             }
         }
     }
-    Ok(used)
+    Ok(reports)
 }
 
 /// Import is a merge: restored files fill misses but never delete or overwrite
 /// local cache entries created after the transfer was saved.
-fn import_aux_caches(transfer: &Path, store: &Path) -> Result<()> {
+fn import_aux_caches(transfer: &Path, store: &Path) -> Result<BTreeMap<&'static str, AuxReport>> {
+    let mut reports: BTreeMap<&'static str, AuxReport> = BTreeMap::new();
     for rel in AUX_CACHE_DIRS {
         let source = transfer.join(rel);
         let mut files = Vec::new();
@@ -209,6 +252,10 @@ fn import_aux_caches(transfer: &Path, store: &Path) -> Result<()> {
                 .strip_prefix(&source)
                 .context("relative auxiliary cache path")?;
             let dst = store.join(rel).join(suffix);
+            let size = std::fs::metadata(&src).map(|m| m.len()).unwrap_or(0);
+            let report = reports.entry(*rel).or_default();
+            report.files += 1;
+            report.bytes += size;
             if dst.exists() {
                 continue;
             }
@@ -217,9 +264,52 @@ fn import_aux_caches(transfer: &Path, store: &Path) -> Result<()> {
             }
             std::fs::copy(&src, &dst)
                 .with_context(|| format!("import auxiliary cache {}", src.display()))?;
+            report.bytes_new += size;
         }
     }
-    Ok(())
+    Ok(reports)
+}
+
+/// Machine-readable report of one `cache export`, written into the transfer
+/// dir so automation (the naspeed GitHub Action) can decide whether re-saving
+/// the cache is worth it without parsing log lines. Lives under `.naspeed/`,
+/// which no walker touches: aux selection only reads the `AUX_CACHE_DIRS`
+/// families and export pruning only sweeps the store-layout subdirectories.
+const SUMMARY_FILE: &str = ".naspeed/export-summary.json";
+
+#[derive(serde::Serialize)]
+struct ExportSummary<'a> {
+    version: u32,
+    entries: usize,
+    entries_skipped: usize,
+    /// Selected native bytes (entries, objects, memo, cached tests).
+    native_bytes: u64,
+    /// Bytes actually copied this export (native + aux): zero when an
+    /// unchanged store is re-exported into the same dir.
+    bytes_new: u64,
+    /// Everything selected for transfer (native + aux).
+    total_bytes: u64,
+    aux: BTreeMap<&'a str, AuxReport>,
+}
+
+fn write_export_summary(
+    dir: &Path,
+    outcome: &export::ExportOutcome,
+    aux: &BTreeMap<&'static str, AuxReport>,
+) -> Result<()> {
+    let bytes_new = outcome.bytes_new + aux.values().map(|r| r.bytes_new).sum::<u64>();
+    let total_bytes = outcome.selected_bytes + aux.values().map(|r| r.bytes).sum::<u64>();
+    let summary = ExportSummary {
+        version: 1,
+        entries: outcome.entries,
+        entries_skipped: outcome.entries_skipped,
+        native_bytes: outcome.selected_bytes,
+        bytes_new,
+        total_bytes,
+        aux: aux.clone(),
+    };
+    let json = serde_json::to_vec_pretty(&summary)?;
+    write_atomic(&dir.join(SUMMARY_FILE), &json)
 }
 
 /// File stem of a store file (`<hash>` or `<hash>.json`) if it is a valid name.
@@ -308,9 +398,11 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(transfer.path().join("go/build")).unwrap();
         std::fs::write(transfer.path().join("go/build/stale"), b"old").unwrap();
-        assert_eq!(
-            export_aux_caches(store.path(), transfer.path(), 0).unwrap(),
-            0
+        assert!(
+            export_aux_caches(store.path(), transfer.path(), 0)
+                .unwrap()
+                .values()
+                .all(|r| r.bytes == 0)
         );
         assert!(
             transfer
@@ -321,10 +413,14 @@ mod tests {
                 .next()
                 .is_none()
         );
-        assert_eq!(
-            export_aux_caches(store.path(), transfer.path(), 8).unwrap(),
-            8
-        );
+        let reports = export_aux_caches(store.path(), transfer.path(), 8).unwrap();
+        assert_eq!(reports.values().map(|r| r.bytes).sum::<u64>(), 8);
+        assert_eq!(reports["go/build"].files, 1);
+        assert_eq!(reports["go/build"].bytes, 4);
+        assert_eq!(reports["go/build"].bytes_new, 4);
+        // Incremental: the same export again copies nothing.
+        let reports = export_aux_caches(store.path(), transfer.path(), 8).unwrap();
+        assert_eq!(reports.values().map(|r| r.bytes_new).sum::<u64>(), 0);
         assert_eq!(
             std::fs::read(transfer.path().join("go/build/a")).unwrap(),
             b"1234"
@@ -356,6 +452,46 @@ mod tests {
     }
 
     #[test]
+    fn export_summary_reports_aux_and_incremental_new_bytes() {
+        use crate::config::CowMode;
+        use crate::store::Store;
+
+        let root = tempfile::tempdir().unwrap();
+        let transfer = tempfile::tempdir().unwrap();
+        Store::open(root.path(), CowMode::Auto).unwrap();
+        std::fs::create_dir_all(root.path().join("go/build")).unwrap();
+        std::fs::write(root.path().join("go/build/a"), b"12345").unwrap();
+
+        let export_once = || {
+            let native = export::run(root.path(), transfer.path(), 1 << 20, CowMode::Auto).unwrap();
+            let aux = export_aux_caches(
+                root.path(),
+                transfer.path(),
+                (1 << 20) - native.selected_bytes,
+            )
+            .unwrap();
+            write_export_summary(transfer.path(), &native, &aux).unwrap();
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(transfer.path().join(SUMMARY_FILE)).unwrap(),
+            )
+            .unwrap()
+        };
+
+        let first = export_once();
+        assert_eq!(first["aux"]["go/build"]["bytes"], 5);
+        assert_eq!(first["aux"]["go/build"]["bytes_new"], 5);
+        assert_eq!(first["bytes_new"], 5);
+        assert_eq!(first["total_bytes"], 5);
+
+        // Re-exporting an unchanged store copies nothing, and nothing prunes
+        // the summary under `.naspeed/` itself.
+        let second = export_once();
+        assert_eq!(second["bytes_new"], 0);
+        assert_eq!(second["aux"]["go/build"]["bytes_new"], 0);
+        assert_eq!(second["total_bytes"], 5);
+    }
+
+    #[test]
     fn complete_transfer_never_exceeds_cap() {
         use crate::config::CowMode;
         use crate::store::Store;
@@ -372,7 +508,7 @@ mod tests {
 
         let cap = 8;
         let native = export::run(root.path(), transfer.path(), cap, CowMode::Auto).unwrap();
-        export_aux_caches(root.path(), transfer.path(), cap - native).unwrap();
+        export_aux_caches(root.path(), transfer.path(), cap - native.selected_bytes).unwrap();
         let mut files = Vec::new();
         walk_files(transfer.path(), &mut files);
         let bytes: u64 = files
