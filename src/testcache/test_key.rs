@@ -150,9 +150,15 @@ pub fn key(plan: &TestPlan, package: &PackageInputs, run: &RunContext) -> Result
         ));
     }
     // Any binary of the workspace, not only the package's: an integration
-    // test may run another member's binary from the profile dir.
+    // test may run another member's binary from the profile dir. `[test]
+    // .bins = "scoped"` narrows this to the package's own binaries; traced
+    // passes that execute other workspace binaries record those in their
+    // inputs, and untraced passes fall back to tracking every binary
+    // (see TestResult::bins).
     if let Some(profile) = profile_dir(run.binary) {
-        let bins = if plan.all_bins.is_empty() {
+        let bins = if plan.all_bins.is_empty()
+            || plan.bins == crate::project::ns_config::TestBinsMode::Scoped
+        {
             &package.bins
         } else {
             &plan.all_bins
@@ -179,7 +185,7 @@ pub fn key(plan: &TestPlan, package: &PackageInputs, run: &RunContext) -> Result
 /// The profile dir holding the uplifted `<bin>` executables, from a test
 /// binary at `<profile>/deps/<test>-<hash>` or, with cargo 1.100's build-dir
 /// layout, at `<profile>/build/<pkg>/<hash>/out/<test>-<hash>`.
-fn profile_dir(binary: &Path) -> Option<&Path> {
+pub fn profile_dir(binary: &Path) -> Option<&Path> {
     crate::target_layout::library_profile(binary.parent()?)
 }
 
@@ -258,6 +264,7 @@ mod tests {
             inputs: vec![root.join("Cargo.lock")],
             packages: Default::default(),
             all_bins: vec!["app".into(), "tool".into()],
+            bins: Default::default(),
             member_dirs: vec![pkg.clone()],
             exclude: vec!["docs/**".into()],
             trace: false,
@@ -316,6 +323,31 @@ mod tests {
         std::fs::write(
             root.join(crate::platform::exe_name("target/debug/tool")),
             "tool v2",
+        )
+        .unwrap();
+        assert_ne!(key_with(&plan, &package, &binary, &env), base);
+    }
+
+    #[test]
+    fn scoped_bins_key_only_on_the_packages_own_binaries() {
+        let (dir, mut plan, package, binary) = setup();
+        plan.bins = crate::project::ns_config::TestBinsMode::Scoped;
+        let root = dir.path();
+        let env = Env::new();
+        let base = key_with(&plan, &package, &binary, &env);
+
+        // Another member's binary no longer joins the key.
+        std::fs::write(
+            root.join(crate::platform::exe_name("target/debug/tool")),
+            "tool v2",
+        )
+        .unwrap();
+        assert_eq!(key_with(&plan, &package, &binary, &env), base);
+
+        // The package's own binary still does.
+        std::fs::write(
+            root.join(crate::platform::exe_name("target/debug/app")),
+            "bin v2",
         )
         .unwrap();
         assert_ne!(key_with(&plan, &package, &binary, &env), base);

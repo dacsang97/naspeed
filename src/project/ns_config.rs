@@ -40,9 +40,27 @@ pub struct TestConfig {
     /// Record what each test binary reads at run time (env, files, dirs,
     /// executables) and replay a pass only while all of it is unchanged.
     pub trace: bool,
+    /// Which workspace binaries join the key: `all` keys every test result
+    /// on every workspace binary, `scoped` only on the tested package's own
+    /// binaries; binaries the tracer sees a passing run execute join that
+    /// run's recorded inputs and are re-checked on replay.
+    pub bins: TestBinsMode,
     /// Globs (relative to the workspace root) left out of the workspace
     /// files hashed when a run could not be traced, e.g. `docs/**`.
     pub exclude: Vec<String>,
+}
+
+/// `[test].bins`: how much of the workspace's binaries a test result key covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TestBinsMode {
+    /// Every workspace binary (cargo may expose any of them to a test).
+    #[default]
+    All,
+    /// Only the tested package's binaries, plus the binaries a traced pass
+    /// was recorded executing. Runs the tracer cannot follow fall back to
+    /// tracking every workspace binary.
+    Scoped,
 }
 
 impl Default for TestConfig {
@@ -52,6 +70,7 @@ impl Default for TestConfig {
             env: Vec::new(),
             inputs: Vec::new(),
             trace: true,
+            bins: TestBinsMode::All,
             exclude: Vec::new(),
         }
     }
@@ -458,6 +477,14 @@ entrypoint = ["/api"]
             [PathBuf::from("configs/rbac.conf"), PathBuf::from("assets")]
         );
         assert_eq!(cfg.image.entrypoint, vec!["/api".to_string()]);
+    }
+
+    #[test]
+    fn scoped_test_bins_parse() {
+        let cfg = NsConfig::parse("[test]\nbins = \"scoped\"\n").unwrap();
+        assert_eq!(cfg.test.bins, TestBinsMode::Scoped);
+        let cfg = NsConfig::parse("").unwrap();
+        assert_eq!(cfg.test.bins, TestBinsMode::All);
     }
 
     #[test]

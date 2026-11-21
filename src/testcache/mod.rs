@@ -93,6 +93,22 @@ pub struct TestResult {
     /// Labelled parts of the key (hashed), for `--explain`.
     #[serde(default)]
     pub components: Vec<(String, String)>,
+    /// `[test].bins = "scoped"` only: every workspace binary of the profile
+    /// dir, recorded when the passing run was not fully traced (the trace
+    /// then cannot prove which binaries the tests executed). Re-hashed on
+    /// replay. Empty for fully traced runs, whose executed binaries sit in
+    /// `inputs`.
+    #[serde(default)]
+    pub bins: Vec<BinWatch>,
+}
+
+/// A workspace binary an incompletely traced passing run may have run:
+/// re-hashed on replay.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BinWatch {
+    pub name: String,
+    pub path: PathBuf,
+    pub hash: String,
 }
 
 /// The last key a test target ran under, so `--explain` can name the part
@@ -426,6 +442,15 @@ fn stale_reason(result: &TestResult, plan: &TestPlan, env: &crate::wrapper::Env)
     {
         return Some(format!("{} changed", i.describe()));
     }
+    for bin in &result.bins {
+        let now = match std::fs::metadata(&bin.path) {
+            Ok(_) => hash_memo::hash(&bin.path).unwrap_or_default(),
+            Err(_) => "\0missing".into(),
+        };
+        if now != bin.hash {
+            return Some(format!("bin:{} changed", bin.name));
+        }
+    }
     // Untraced runs, and traced runs that started a program the tracer
     // could not follow, also depend on the workspace files.
     let recorded = result.workspace_files.as_deref()?;
@@ -611,7 +636,14 @@ fn try_cached_run(binary: &Path, args: &[OsString]) -> Option<i32> {
         && let (Some(stdout), Some(stderr)) = (output.stdout, output.stderr)
     {
         let traced = lib.as_ref().and_then(|_| {
-            let excl = trace::Exclusions::new(&plan.target_dir, &plan.store, &env);
+            let mut excl = trace::Exclusions::new(&plan.target_dir, &plan.store, &env);
+            // Scoped plans track only the package's binaries in the key;
+            // let the trace record executions of the others instead.
+            if plan.bins == crate::project::ns_config::TestBinsMode::Scoped
+                && let Some(profile) = test_key::profile_dir(binary)
+            {
+                excl.allow_profile_bins(profile, &plan.all_bins);
+            }
             trace::collect(&log, binary, &env, &excl)
         });
         let complete = traced.as_ref().is_some_and(|t| !t.partial);
@@ -628,6 +660,33 @@ fn try_cached_run(binary: &Path, args: &[OsString]) -> Option<i32> {
             );
         }
         let inputs = traced.map(|t| t.inputs);
+        // Scoped plans leave other members' binaries out of the key; a run
+        // the tracer could not follow might still have executed any of
+        // them, so their content is recorded here and re-hashed on replay.
+        let bins = if !complete && plan.bins == crate::project::ns_config::TestBinsMode::Scoped {
+            test_key::profile_dir(binary)
+                .map(|profile| {
+                    plan.all_bins
+                        .iter()
+                        .map(|name| {
+                            let path =
+                                profile.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+                            let hash = std::fs::metadata(&path)
+                                .ok()
+                                .and_then(|_| hash_memo::hash(&path).ok())
+                                .unwrap_or_else(|| "\0missing".into());
+                            BinWatch {
+                                name: name.clone(),
+                                path,
+                                hash,
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let mut e = summary_base;
         e["status"] = "passed".into();
         e["traced"] = (if complete {
@@ -650,6 +709,7 @@ fn try_cached_run(binary: &Path, args: &[OsString]) -> Option<i32> {
             created: now_secs(),
             inputs,
             workspace_files,
+            bins,
             components: k.components.clone(),
         };
         let last = LastRun {
@@ -675,6 +735,38 @@ fn try_cached_run(binary: &Path, args: &[OsString]) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_changed_watched_binary_stales_the_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("tool");
+        std::fs::write(&bin, "v1").unwrap();
+        let result = TestResult {
+            version: TEST_RESULT_VERSION,
+            key: "k".into(),
+            binary: "tool-tests".into(),
+            stdout: String::new(),
+            stderr: String::new(),
+            run_ms: 0,
+            created: 0,
+            inputs: None,
+            workspace_files: None,
+            bins: vec![BinWatch {
+                name: "tool".into(),
+                path: bin.clone(),
+                hash: crate::testcache::hash_memo::hash(&bin).unwrap(),
+            }],
+            components: Vec::new(),
+        };
+        let plan = TestPlan::default();
+        let env = crate::wrapper::Env::new();
+        assert!(stale_reason(&result, &plan, &env).is_none());
+        std::fs::write(&bin, "v2").unwrap();
+        assert_eq!(
+            stale_reason(&result, &plan, &env).as_deref(),
+            Some("bin:tool changed")
+        );
+    }
 
     #[test]
     fn finds_targets_before_the_separator() {

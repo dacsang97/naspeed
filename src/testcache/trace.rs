@@ -208,6 +208,10 @@ fn ignored_env(name: &str) -> bool {
 /// Path prefixes whose content naspeed does not track.
 pub struct Exclusions {
     prefixes: Vec<PathBuf>,
+    /// Exact paths kept despite a prefix match: workspace binaries under
+    /// the target dir that a scoped `[test].bins` plan lets the trace
+    /// cover instead of the key.
+    allowed: BTreeSet<PathBuf>,
 }
 
 impl Exclusions {
@@ -251,10 +255,26 @@ impl Exclusions {
             .map(PathBuf::from)
             .or_else(|| home.as_ref().map(|h| h.join(".rustup")));
         prefixes.extend(rustup);
-        Exclusions { prefixes }
+        Exclusions {
+            prefixes,
+            allowed: BTreeSet::new(),
+        }
+    }
+
+    /// Keep `<profile>/<bin>` paths traceable even though they live under
+    /// the excluded target dir. Used by `[test].bins = "scoped"` plans, so
+    /// a passing run that executes another member's binary records it.
+    pub fn allow_profile_bins(&mut self, profile: &Path, bins: &[String]) {
+        for bin in bins {
+            self.allowed
+                .insert(profile.join(format!("{bin}{}", std::env::consts::EXE_SUFFIX)));
+        }
     }
 
     fn excluded(&self, path: &Path) -> bool {
+        if self.allowed.contains(path) {
+            return false;
+        }
         // Terminal capability lookups (libtest's colour support).
         path.components()
             .any(|c| c.as_os_str() == "terminfo" || c.as_os_str() == ".terminfo")
@@ -375,6 +395,42 @@ mod tests {
     use super::*;
 
     // Tracer logs (and the paths in them) come from Unix only.
+    #[test]
+    #[cfg(unix)]
+    fn allowed_profile_bins_are_recorded_despite_the_target_exclusion() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let target = root.join("target");
+        let profile = target.join("debug");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join(crate::platform::exe_name("tool")), "tool v1").unwrap();
+        let log = root.join("log");
+        std::fs::write(
+            &log,
+            format!(
+                "I\t\nX\t{}\nX\t{}\n",
+                profile.join(crate::platform::exe_name("tool")).display(),
+                profile.join(crate::platform::exe_name("other")).display(),
+            ),
+        )
+        .unwrap();
+        let env = Env::new();
+        let mut excl = Exclusions::new(&target, Path::new("/store"), &env);
+        excl.allow_profile_bins(&profile, &["tool".to_string()]);
+        let inputs = collect(&log, Path::new("/bin/test"), &env, &excl)
+            .unwrap()
+            .inputs;
+        let names: Vec<String> = inputs.iter().map(Input::describe).collect();
+        // The allowed bin is recorded; the neighbouring bin still excluded.
+        assert_eq!(
+            names,
+            vec![format!(
+                "file {}",
+                profile.join(crate::platform::exe_name("tool")).display()
+            )]
+        );
+    }
+
     #[test]
     #[cfg(unix)]
     fn log_becomes_inputs_without_system_or_target_paths() {
