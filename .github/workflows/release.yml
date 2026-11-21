@@ -19,7 +19,9 @@ jobs:
       ref: ${{ github.sha }}
 
   release-pr:
-    needs: ci
+    # Runs concurrently with ci: the Release PR only rewrites version and
+    # changelog, and its own CI is dispatched below. `publish` stays gated on
+    # ci, so a broken main can still not ship.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     concurrency:
