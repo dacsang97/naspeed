@@ -92,7 +92,7 @@ repository; `cache-max-gb` (default 3) caps each exported store.
 
 Every export also writes `.naspeed/export-summary.json` into the exported
 directory: selected and newly copied bytes, per auxiliary family (`go/build`,
-`oci/buildkit`). A cache key is immutable, so a save always re-uploads the
+`go/mod/cache/download`, `oci/buildkit`). A cache key is immutable, so a save always re-uploads the
 whole payload; the action reads that summary and skips re-saving when fewer
 than `save-min-delta-mb` (default 50) new bytes were copied, which stops a
 repo whose store barely changes from pushing a fresh multi-hundred-MB key on

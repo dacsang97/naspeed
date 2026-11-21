@@ -204,12 +204,15 @@ extra_files = ["configs/casbin/rbac_model.conf", "assets"]
 tags = ["{version}", "latest"]
 ```
 
-`ns release --snapshot` and `ns release --publish` use Go's content-addressed
-compiled build cache under the naspeed store (`go/build`), so the GitHub
-Action's store-directory cache carries it between CI runs. Dependency modules
-remain in the standard Go-managed cache and are not transferred by naspeed. Go
-targets use `GOOS/GOARCH` spelling. A tagged Go release takes its version from the single
-`vX.Y.Z` tag on `HEAD`; snapshots use `0.0.0-SNAPSHOT-<sha>`.
+`ns release --snapshot` and `ns release --publish` point both Go caches at the
+naspeed store: the content-addressed compiled build cache (`go/build`) and the
+module cache (`go/mod`), so the GitHub Action's store-directory cache carries
+them between CI runs and a cold runner stops re-downloading dependencies.
+Only `go/mod/cache/download` — checksummed public artifacts — is transferred;
+`go/mod/cache/vcs`, which holds the git clones and their private-module
+credentials, never leaves the machine. Go targets use `GOOS/GOARCH` spelling.
+A tagged Go release takes its version from the single `vX.Y.Z` tag on `HEAD`;
+snapshots use `0.0.0-SNAPSHOT-<sha>`.
 
 When `image.dockerfile` is set, `ns image` stages the selected release binary
 and `extra_files` in an isolated context and runs Docker Buildx. `--push`
