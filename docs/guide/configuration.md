@@ -33,6 +33,7 @@ These override the file:
 | `NASPEED_CONFIG_DIR` | Config directory |
 | `NASPEED_DISABLE=1` | Pass every call through |
 | `NASPEED_BUILD_SCRIPT_CACHE=0` | Run build scripts uncached |
+| `NASPEED_UPDATE_CHECK=0` | No update notice in `ns dev` |
 | `NASPEED_WORKSPACE_CACHE=0` | Do not cache workspace crates |
 | `NASPEED_WORKSPACE_CACHE_MAX_ENTRY_MB` | Size limit for a stored workspace crate (0: none) |
 | `NASPEED_MIN_FREE_DISK_PCT` | Free-space floor for storing misses (0: off) |

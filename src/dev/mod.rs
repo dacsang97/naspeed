@@ -19,11 +19,11 @@ mod go_dev;
 mod go_list;
 mod go_test_runner;
 mod line_reader;
-mod log_bus;
+pub(crate) mod log_bus;
 mod log_files;
 mod plain_renderer;
 mod process_supervisor;
-mod status_line;
+pub(crate) mod status_line;
 mod target_gc;
 pub(crate) mod toolchain;
 mod tui;
@@ -71,6 +71,8 @@ pub fn run(args: DevArgs) -> Result<u8> {
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal();
     let (bus, rx) = LogBus::channel();
+    // One-line "update available" notice, posted to the bus off-thread.
+    crate::update::notify_async(&bus);
     let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
     let mut files = settings.log_dir.as_ref().and_then(|dir| {
         match log_files::LogFiles::start(dir, &bins, bus.clone()) {
