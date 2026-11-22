@@ -63,7 +63,8 @@ pub(super) fn handle_key(
 }
 
 /// The wheel scrolls the logs; a press and drag on them selects text and
-/// the release copies it; a click on a tab opens it.
+/// the release copies it; a double-click picks the word under the pointer;
+/// a click on a tab opens it.
 pub(super) fn handle_mouse(state: &mut TuiState, mouse: MouseEvent, screen: &mut ScreenMap) {
     let at = Position::new(mouse.column, mouse.row);
     match mouse.kind {
@@ -86,9 +87,18 @@ pub(super) fn handle_mouse(state: &mut TuiState, mouse: MouseEvent, screen: &mut
         MouseEventKind::Down(MouseButton::Left) => {
             screen.selection = None;
             if let Some(tab) = screen.tab_at(at) {
+                screen.last_click = None;
                 state.choose_tab(tab);
             } else if screen.in_log_area(at) {
+                let clicks = screen.log_click_count(at);
                 screen.start_selection(at);
+                if clicks == 2
+                    && let Some(selection) = screen.selection.as_mut()
+                {
+                    selection.select_word();
+                }
+            } else {
+                screen.last_click = None;
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
