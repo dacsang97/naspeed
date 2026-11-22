@@ -25,8 +25,10 @@ const CRATES_IO_API: &str = "https://crates.io/api/v1/crates/naspeed";
 const TAP_FORMULA_RAW: &str =
     "https://raw.githubusercontent.com/dacsang97/homebrew-tap/main/naspeed.rb";
 
-/// Hours a cached "latest version" answer is trusted before re-checking.
-const CACHE_TTL_SECS: u64 = 20 * 3600;
+/// Hours a cached "update available" answer is trusted before re-checking.
+const UPDATE_CACHE_TTL_SECS: u64 = 20 * 3600;
+/// A "no update" answer expires quickly so closely-spaced releases are seen.
+const NO_UPDATE_CACHE_TTL_SECS: u64 = 15 * 60;
 /// Update checks must never hang a development loop.
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -99,6 +101,14 @@ fn cache_path(config_dir: &Path) -> PathBuf {
 
 fn read_cache(path: &Path) -> Option<UpdateCache> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+fn cache_is_fresh(cache: &UpdateCache, now: u64) -> bool {
+    let ttl = match cache.latest.as_deref() {
+        Some(latest) if newer_than(latest, CURRENT) => UPDATE_CACHE_TTL_SECS,
+        _ => NO_UPDATE_CACHE_TTL_SECS,
+    };
+    cache.checked_at.saturating_add(ttl) > now
 }
 
 /// `latest` ordered after `current`: numeric `major.minor.patch` compare,
@@ -190,7 +200,7 @@ pub fn latest_cached_or_fetched(config_dir: &Path, method: InstallMethod) -> Opt
     let cache = read_cache(&path);
     let now = crate::store::now_secs();
     if let Some(c) = &cache
-        && c.checked_at + CACHE_TTL_SECS > now
+        && cache_is_fresh(c, now)
     {
         return c.latest.clone();
     }
@@ -268,6 +278,36 @@ mod tests {
         assert!(!newer_than("0.12.2", "0.12.10"));
         assert!(!newer_than("garbage", "0.12.2"));
         assert!(!newer_than("0.12", "0.12.0"));
+    }
+
+    #[test]
+    fn no_update_cache_expires_before_an_available_update_cache() {
+        let checked_at = 1_000;
+        let current = UpdateCache {
+            latest: Some(CURRENT.to_string()),
+            checked_at,
+        };
+        assert!(cache_is_fresh(
+            &current,
+            checked_at + NO_UPDATE_CACHE_TTL_SECS - 1
+        ));
+        assert!(!cache_is_fresh(
+            &current,
+            checked_at + NO_UPDATE_CACHE_TTL_SECS
+        ));
+
+        let available = UpdateCache {
+            latest: Some("99.0.0".to_string()),
+            checked_at,
+        };
+        assert!(cache_is_fresh(
+            &available,
+            checked_at + NO_UPDATE_CACHE_TTL_SECS
+        ));
+        assert!(!cache_is_fresh(
+            &available,
+            checked_at + UPDATE_CACHE_TTL_SECS
+        ));
     }
 
     #[test]

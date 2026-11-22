@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(dev)* refresh cached no-update answers after 15 minutes so closely-spaced releases are announced
+- *(dev)* keep double-click word highlighting off blank log rows and preserve the whole word on release
+
 ## [0.13.2](https://github.com/dacsang97/naspeed/compare/v0.13.1...v0.13.2) - 2026-11-22
 
 ### Fixed
