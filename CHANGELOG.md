@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1](https://github.com/dacsang97/naspeed/compare/v0.13.0...v0.13.1) - 2026-11-22
+
+### Added
+
+- *(dev)* double-click selects the word under the pointer ([#51](https://github.com/dacsang97/naspeed/pull/51))
+
 ### Added
 
 - *(dev)* double-click in the TUI log area selects and copies the word under the pointer
