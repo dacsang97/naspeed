@@ -1,8 +1,10 @@
 //! Mouse text selection over the log area, as in a terminal: press, drag,
-//! release copies. A selection holds the last painted viewport, while rows
-//! visited by wheel scrolling are retained by logical log-line position.
+//! release copies, and a double-click picks the word under the pointer.
+//! A selection holds the last painted viewport, while rows visited by wheel
+//! scrolling are retained by logical log-line position.
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use ratatui::{
     buffer::{Buffer, Cell},
@@ -10,6 +12,7 @@ use ratatui::{
     style::Modifier,
     text::Span,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 /// How a painted log row relates to its log line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +58,8 @@ pub(super) struct TextSelection {
     anchor: SelectionPoint,
     head: SelectionPoint,
     dragging: bool,
+    /// A double-click word pick; a one-cell word keeps anchor == head.
+    word: bool,
 }
 
 impl TextSelection {
@@ -70,6 +75,7 @@ impl TextSelection {
             anchor,
             head: anchor,
             dragging: true,
+            word: false,
         };
         selection.capture_rows();
         Some(selection)
@@ -89,6 +95,87 @@ impl TextSelection {
         if let Some(head) = point_at(self.frame.area, &self.rows, at) {
             self.head = head;
         }
+        self.word = false;
+    }
+
+    /// Expand to the word under the anchor (a double-click).
+    /// False when the anchor sits on blank space.
+    pub(super) fn select_word(&mut self) -> bool {
+        let area = self.frame.area;
+        // The logical line around the anchor: its wrapped rows in paint order.
+        let first = RowKey {
+            id: self.anchor.row.id,
+            offset: 0,
+        };
+        // Each character's first cell and its byte offset in the joined text.
+        let mut marks: Vec<(SelectionPoint, usize)> = Vec::new();
+        let mut text = String::new();
+        for (key, row) in self.captured.range(first..) {
+            if key.id != self.anchor.row.id {
+                break;
+            }
+            let mut x = area.x;
+            if row.info.continues {
+                x += row.info.indent;
+            }
+            for cell in &row.cells[usize::from(x - area.x)..] {
+                let symbol = cell.symbol();
+                if symbol.is_empty() {
+                    x += 1;
+                    continue;
+                }
+                marks.push((SelectionPoint { row: *key, x }, text.len()));
+                text.push_str(symbol);
+                x += (Span::raw(symbol).width() as u16).max(1);
+            }
+        }
+        // The character under the anchor; blank space cancels the word pick.
+        let Some(index) = marks
+            .iter()
+            .take_while(|(point, _)| *point <= self.anchor)
+            .count()
+            .checked_sub(1)
+        else {
+            return false;
+        };
+        let (point, offset) = marks[index];
+        let cell_end = match marks.get(index + 1).filter(|(p, _)| p.row == point.row) {
+            Some((next, _)) => next.x,
+            None => {
+                let symbol = text[offset..].chars().next().unwrap();
+                point.x + (Span::raw(symbol.to_string()).width() as u16).max(1)
+            }
+        };
+        if point.row != self.anchor.row || self.anchor.x >= cell_end {
+            return false;
+        }
+        let Some(word) = text
+            .split_word_bound_indices()
+            .map(|(start, word)| start..start + word.len())
+            .find(|range| range.contains(&offset))
+        else {
+            return false;
+        };
+        if text[word.clone()].trim().is_empty() {
+            return false;
+        }
+        let at = |byte: usize| {
+            marks
+                .iter()
+                .take_while(|(_, b)| *b <= byte)
+                .last()
+                .map(|(point, _)| *point)
+        };
+        let Some(start) = at(word.start) else {
+            return false;
+        };
+        let Some(end) = word.end.checked_sub(1).and_then(at) else {
+            return false;
+        };
+        self.anchor = start;
+        self.head = end;
+        self.word = true;
+        true
     }
 
     /// Replace the held viewport after wheel scrolling and retain its rows for
@@ -122,7 +209,7 @@ impl TextSelection {
     /// The selected text: wrapped rows rejoin into their line without the
     /// tag indent, line ends lose trailing blanks, lines end with `\n`.
     pub(super) fn text(&self) -> String {
-        if self.anchor == self.head {
+        if self.anchor == self.head && !self.word {
             return String::new();
         }
         let (start, end) = self.bounds();
@@ -192,7 +279,7 @@ impl TextSelection {
     }
 
     fn contains(&self, position: Position) -> bool {
-        if self.anchor == self.head {
+        if self.anchor == self.head && !self.word {
             return false;
         }
         let Some(point) = point_at(self.frame.area, &self.rows, position) else {
@@ -225,6 +312,24 @@ fn clamp(area: Rect, at: Position) -> Position {
         at.x.clamp(area.x, area.right().saturating_sub(1)),
         at.y.clamp(area.y, area.bottom().saturating_sub(1)),
     )
+}
+
+/// Repeat presses on one cell within 400 ms build up a click count; 2 is a
+/// double-click. Terminals report no double-click event, only
+/// presses, so the count is kept here.
+pub(super) fn click_count(
+    last_click: &mut Option<(Instant, u16, u16, u8)>,
+    column: u16,
+    row: u16,
+) -> u8 {
+    let now = Instant::now();
+    let clicks = last_click
+        .filter(|(at, x, y, _)| {
+            now.duration_since(*at) < Duration::from_millis(400) && *x == column && *y == row
+        })
+        .map_or(1, |(_, _, _, clicks)| clicks.saturating_add(1));
+    *last_click = Some((now, column, row, clicks));
+    clicks
 }
 
 #[cfg(test)]
@@ -312,5 +417,73 @@ mod tests {
             .collect();
         assert_eq!(reversed, [false, true, true, false]);
         assert_eq!(buffer[(0, 2)].symbol(), "a");
+    }
+
+    #[test]
+    fn a_double_click_selects_the_word_under_the_pointer() {
+        let mut selection = TextSelection::start(
+            frame(&["[api] listening on :8080"]),
+            vec![row(1, 0, false)],
+            Position::new(14, 2),
+        )
+        .unwrap();
+        assert!(selection.select_word());
+        assert_eq!(selection.release().as_deref(), Some("listening"));
+    }
+
+    #[test]
+    fn a_double_click_on_blank_space_selects_nothing() {
+        let mut after_text = TextSelection::start(
+            frame(&["[api] ready     "]),
+            vec![row(1, 0, false)],
+            Position::new(13, 2),
+        )
+        .unwrap();
+        assert!(!after_text.select_word());
+        assert_eq!(after_text.release(), None);
+
+        let mut short_line = TextSelection::start(
+            frame(&["[api] x", "[api] listening"]),
+            vec![row(1, 0, false), row(2, 0, false)],
+            Position::new(10, 2),
+        )
+        .unwrap();
+        assert!(!short_line.select_word());
+        assert_eq!(short_line.release(), None);
+    }
+
+    #[test]
+    fn a_double_click_word_spans_wrapped_rows_and_marks_one_cell() {
+        let mut selection = TextSelection::start(
+            frame(&["[api] a long line th", "      at wraps here"]),
+            vec![row(1, 0, false), row(1, 1, true)],
+            Position::new(18, 2),
+        )
+        .unwrap();
+        assert!(selection.select_word());
+        assert_eq!(selection.release().as_deref(), Some("that"));
+
+        let mut one_cell = TextSelection::start(
+            frame(&["[api] a b"]),
+            vec![row(1, 0, false)],
+            Position::new(8, 2),
+        )
+        .unwrap();
+        assert!(one_cell.select_word());
+        assert_eq!(one_cell.release().as_deref(), Some("b"));
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 9, 3));
+        one_cell.paint(&mut buffer);
+        assert!(buffer[(8, 2)].modifier.contains(Modifier::REVERSED));
+        assert!(!buffer[(7, 2)].modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn clicks_on_one_cell_within_400_ms_count_up() {
+        let mut last = None;
+        assert_eq!(click_count(&mut last, 3, 2), 1);
+        assert_eq!(click_count(&mut last, 3, 2), 2);
+        assert_eq!(click_count(&mut last, 4, 2), 1);
+        last.as_mut().unwrap().0 = Instant::now() - Duration::from_secs(1);
+        assert_eq!(click_count(&mut last, 3, 2), 1);
     }
 }

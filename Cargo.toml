@@ -39,6 +39,7 @@ toml = "1"
 toml_edit = "0.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }
+unicode-segmentation = "1"
 ureq = "3.5"
 zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
 

@@ -1081,6 +1081,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "tracing-subscriber",
+ "unicode-segmentation",
  "ureq",
  "windows-sys 0.61.2",
  "zip",

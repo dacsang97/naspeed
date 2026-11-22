@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use ratatui::{
     Frame,
@@ -11,7 +12,7 @@ use ratatui::{
 
 use super::app_state::{ScrollPosition, TuiState};
 use super::render_status;
-use super::text_selection::{RowInfo, TextSelection};
+use super::text_selection::{self, RowInfo, TextSelection};
 use super::wrap;
 
 const WRAP_CACHE_LIMIT: usize = 100_000;
@@ -33,6 +34,8 @@ pub(super) struct ScreenMap {
     painted: Option<Buffer>,
     pub(super) selection: Option<TextSelection>,
     selection_needs_refresh: bool,
+    /// Last press on the log area, for double-click word selection.
+    pub(super) last_click: Option<(Instant, u16, u16, u8)>,
     /// Row of the tab bar and each tab's columns `[start, end)`.
     tab_row: u16,
     tab_spans: Vec<(u16, u16)>,
@@ -71,6 +74,11 @@ impl ScreenMap {
                 })
             })
             .collect()
+    }
+
+    /// Presses on the same log cell within 400 ms: 2 is a double-click.
+    pub(super) fn log_click_count(&mut self, at: Position) -> u8 {
+        text_selection::click_count(&mut self.last_click, at.x, at.y)
     }
 
     /// Start a selection on the log area as last painted.
