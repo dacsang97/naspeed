@@ -194,6 +194,15 @@ impl TextSelection {
         (!text.is_empty()).then_some(text)
     }
 
+    /// Release at the final pointer position. A double-click without a drag
+    /// keeps the whole word instead of collapsing its free end to one cell.
+    pub(super) fn release_at(&mut self, at: Position) -> Option<String> {
+        if !self.word {
+            self.drag_to(at);
+        }
+        self.release()
+    }
+
     /// Paint the held frame with the selected cells reversed.
     pub(super) fn paint(&self, buffer: &mut Buffer) {
         let area = self.frame.area.intersection(buffer.area);
@@ -282,7 +291,7 @@ impl TextSelection {
         if self.anchor == self.head && !self.word {
             return false;
         }
-        let Some(point) = point_at(self.frame.area, &self.rows, position) else {
+        let Some(point) = painted_point_at(self.frame.area, &self.rows, position) else {
             return false;
         };
         let (start, end) = self.bounds();
@@ -290,20 +299,32 @@ impl TextSelection {
     }
 }
 
+fn painted_point_at(area: Rect, rows: &[Option<RowInfo>], at: Position) -> Option<SelectionPoint> {
+    if !area.contains(at) {
+        return None;
+    }
+    let index = usize::from(at.y - area.y);
+    let info = rows.get(index).copied().flatten()?;
+    Some(SelectionPoint {
+        row: RowKey::from(info),
+        x: at.x,
+    })
+}
+
 fn point_at(area: Rect, rows: &[Option<RowInfo>], at: Position) -> Option<SelectionPoint> {
-    let index = usize::from(at.y.saturating_sub(area.y));
-    let info = rows.get(index).copied().flatten().or_else(|| {
-        rows[..index.min(rows.len())]
+    painted_point_at(area, rows, at).or_else(|| {
+        let index = usize::from(at.y.saturating_sub(area.y));
+        let info = rows[..index.min(rows.len())]
             .iter()
             .rev()
             .copied()
             .flatten()
             .next()
-            .or_else(|| rows.iter().skip(index).copied().flatten().next())
-    })?;
-    Some(SelectionPoint {
-        row: RowKey::from(info),
-        x: at.x,
+            .or_else(|| rows.iter().skip(index).copied().flatten().next())?;
+        Some(SelectionPoint {
+            row: RowKey::from(info),
+            x: at.x,
+        })
     })
 }
 
@@ -420,15 +441,42 @@ mod tests {
     }
 
     #[test]
+    fn painting_does_not_map_blank_viewport_rows_to_the_last_log_row() {
+        let area = Rect::new(0, 2, 12, 4);
+        let mut painted = Buffer::empty(area);
+        painted.set_string(0, 2, "alpha beta", ratatui::style::Style::default());
+        let mut selection = TextSelection::start(
+            painted,
+            vec![row(1, 0, false), None, None, None],
+            Position::new(1, 2),
+        )
+        .unwrap();
+        assert!(selection.select_word());
+
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 12, 6));
+        selection.paint(&mut buffer);
+        assert!(buffer[(1, 2)].modifier.contains(Modifier::REVERSED));
+        for y in 3..6 {
+            assert!(
+                !(0..12).any(|x| buffer[(x, y)].modifier.contains(Modifier::REVERSED)),
+                "blank row {y} must stay unselected"
+            );
+        }
+    }
+
+    #[test]
     fn a_double_click_selects_the_word_under_the_pointer() {
         let mut selection = TextSelection::start(
             frame(&["[api] listening on :8080"]),
             vec![row(1, 0, false)],
-            Position::new(14, 2),
+            Position::new(10, 2),
         )
         .unwrap();
         assert!(selection.select_word());
-        assert_eq!(selection.release().as_deref(), Some("listening"));
+        assert_eq!(
+            selection.release_at(Position::new(10, 2)).as_deref(),
+            Some("listening")
+        );
     }
 
     #[test]

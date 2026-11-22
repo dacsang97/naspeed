@@ -110,8 +110,7 @@ pub(super) fn handle_mouse(state: &mut TuiState, mouse: MouseEvent, screen: &mut
             let Some(selection) = screen.selection.as_mut().filter(|s| s.dragging()) else {
                 return;
             };
-            selection.drag_to(at);
-            match selection.release() {
+            match selection.release_at(at) {
                 Some(text) => copy(state, &text),
                 None => screen.selection = None,
             }
