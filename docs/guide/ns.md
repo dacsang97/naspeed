@@ -12,6 +12,7 @@ Invoked as `ns`, the binary never enters wrapper mode, so a typo like
 | Command | What it does |
 |---|---|
 | `ns dev [--bin B]… [--all] [--no-tui] [--test] [-- args]` | Detects Cargo or Go, watches build inputs, builds once, then restarts only affected application process groups. Failed builds leave old processes serving; changes during builds are queued. Interactive terminals get the searchable log TUI; pipes and `--no-tui` get prefixed plain output. See [`ns dev`](#ns-dev). |
+| `ns dev --no-tui --exec -- <command> [args]` | Runs an external foreground command with this naspeed binary as `RUSTC_WRAPPER`. Streams stay attached to the terminal; naspeed does not watch files, launch a TUI, or change global Cargo config. |
 | `ns fmt [--check] [cargo fmt args]` | `cargo fmt` over every package of the workspace; `--check` reports unformatted files instead of rewriting them. Packages whose `.rs` files are unchanged since they were last formatted cleanly are skipped (the record is in the store, keyed by rustfmt version and config, shared by all worktrees), so a repeat run takes a fraction of a second. `-p` narrows it (no cache), rustfmt flags go after `--`. |
 | `ns check [--fix] [--no-fmt] [clippy args]` | Format, lint and type check in one step: `cargo fmt --check`, then `cargo clippy --workspace --all-targets -- -D warnings`, both through the cache. Each step is reported and the command fails if either fails. `-p` or target flags narrow the clippy run, flags after `--` replace `-D warnings`, and `--fix` formats in place and applies clippy's automatic fixes. |
 | `ns test [--no-cache] [cargo test args] [-- test args]` | Runs `cargo test` with naspeed as the target runner; a test binary whose inputs did not change since it last passed replays that run's output (marked `(cached)` on stderr) instead of running. Failures are never cached, and every binary runs even after one fails (`--fail-fast` stops at the first, like plain cargo). It ends with what the run did: rustc hits and misses, test binaries replayed and run. `ns dev --test` goes through the same cache. See [Test result cache](./test-cache). |
@@ -32,6 +33,10 @@ binary can embed its version with `option_env!("NS_VERSION")`.
 every project binary and cannot be combined with `--bin`. If neither is
 provided, `[dev].bins` is used; legacy `[dev].bin` remains supported. Arguments
 after `--` replace configured arguments and require exactly one selected bin.
+
+Use `--exec` when the supplied command owns the development loop. It implies
+plain output and leaves stdout and stderr untouched; add `2>&1` to combine
+them. `--bin`, `--all`, and `--test` apply only to the managed loop.
 
 ```toml
 [dev]

@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 use crate::commands;
@@ -93,8 +93,8 @@ pub enum Command {
     Build(BuildArgs),
     /// Remove artifacts naspeed placed into a target dir.
     Purge(PurgeArgs),
-    /// Watch a Cargo or Go project: build, test, and selectively restart binaries on change.
-    Dev(crate::dev::DevArgs),
+    /// Watch a project or run an external development command in the foreground.
+    Dev(DevCliArgs),
     /// Build the release target matrix, archive, checksum, sign and publish.
     Release(crate::release::ReleaseArgs),
     /// Build and push a multi-arch OCI image from release binaries (no Docker daemon).
@@ -131,6 +131,28 @@ pub enum Command {
     /// Cached run of a registry crate's build script (called by its launcher).
     #[command(name = "__build-script", hide = true)]
     BuildScript(BuildScriptArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DevCliArgs {
+    /// Binary to run; repeat to select multiple project binaries.
+    #[arg(long, action = clap::ArgAction::Append)]
+    bin: Vec<String>,
+    /// Select every binary in the project.
+    #[arg(long)]
+    all: bool,
+    /// Disable the interactive terminal interface.
+    #[arg(long)]
+    no_tui: bool,
+    /// Run tests of changed packages and their dependents after each clean build.
+    #[arg(long)]
+    test: bool,
+    /// Run a command after `--` with naspeed's Cargo cache, without a watcher or TUI.
+    #[arg(long, requires = "args", conflicts_with_all = ["bin", "all", "test"])]
+    exec: bool,
+    /// Arguments for the selected binary, or a command and its arguments with `--exec`.
+    #[arg(last = true)]
+    args: Vec<OsString>,
 }
 
 #[derive(Debug, Args)]
@@ -279,7 +301,7 @@ pub fn run(args: Vec<OsString>) -> Result<u8> {
             commands::build::run(a)
         }
         Command::Purge(a) => commands::purge::run(a),
-        Command::Dev(a) => crate::dev::run(a),
+        Command::Dev(a) => run_dev(a),
         Command::Update(a) => commands::update::run(a),
         Command::Release(a) => crate::release::run(a),
         Command::Image(a) => crate::image::run(a),
@@ -318,6 +340,48 @@ pub fn run(args: Vec<OsString>) -> Result<u8> {
             zig.execute()?;
             Ok(0)
         }
+    }
+}
+
+fn run_dev(args: DevCliArgs) -> Result<u8> {
+    if args.exec {
+        return exec_cached(&args.args);
+    }
+    let arguments = args
+        .args
+        .into_iter()
+        .map(|arg| {
+            arg.into_string()
+                .map_err(|_| anyhow::anyhow!("dev arguments must be UTF-8"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    crate::dev::run(crate::dev::DevArgs {
+        bin: args.bin,
+        all: args.all,
+        no_tui: args.no_tui,
+        test: args.test,
+        args: arguments,
+    })
+}
+
+fn exec_cached(args: &[OsString]) -> Result<u8> {
+    let (program, argv) = args.split_first().context("missing command")?;
+    // `ns` always parses CLI commands; Cargo must call its naspeed target instead.
+    let wrapper =
+        dunce::canonicalize(std::env::current_exe()?).context("resolve naspeed Cargo wrapper")?;
+    let mut command = std::process::Command::new(program);
+    command.args(argv).env("RUSTC_WRAPPER", wrapper);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(command.exec()).with_context(|| format!("execute {program:?}"))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command
+            .status()
+            .with_context(|| format!("execute {program:?}"))?;
+        Ok(status.code().unwrap_or(1).clamp(0, 255) as u8)
     }
 }
 
