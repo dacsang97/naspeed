@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.4](https://github.com/dacsang97/naspeed/compare/v0.13.3...v0.13.4) - 2026-11-27
+
+### Fixed
+
+- *(dev)* stream plain dev logs to stdout ([#58](https://github.com/dacsang97/naspeed/pull/58))
+
 ## [0.13.3](https://github.com/dacsang97/naspeed/compare/v0.13.2...v0.13.3) - 2026-11-22
 
 ### Fixed
