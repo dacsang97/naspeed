@@ -55,6 +55,8 @@ pub struct Settings {
     pub workspace_cache_max_entry_mb: u64,
     /// Cache workspace members and path dependencies (keyed per source file).
     pub workspace_cache: bool,
+    /// Use verified local ActionResults for workspace libraries.
+    pub rust_action_cache: bool,
     /// Peer stores (`naspeed cache serve`, e.g. over Tailscale) asked on a
     /// local miss, in order.
     pub remotes: Vec<String>,
@@ -193,6 +195,10 @@ impl Settings {
                 .get("workspace_cache")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
+            rust_action_cache: doc
+                .get("rust_action_cache")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             remotes,
             remote_token_file,
             warm_incremental: doc
@@ -244,6 +250,9 @@ impl Settings {
         }
         if let Ok(v) = std::env::var("NASPEED_WORKSPACE_CACHE") {
             self.workspace_cache = !(v == "0" || v == "false");
+        }
+        if std::env::var_os("NASPEED_RUST_ACTION_CACHE").is_some() {
+            self.rust_action_cache = env_flag("NASPEED_RUST_ACTION_CACHE");
         }
         if let Ok(v) = std::env::var("NASPEED_WARM_INCREMENTAL") {
             self.warm_incremental = !(v == "0" || v == "false");

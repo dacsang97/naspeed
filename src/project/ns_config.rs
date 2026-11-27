@@ -110,6 +110,10 @@ pub struct AppConfig {
     pub args: Option<Vec<String>>,
     pub env_file: Option<PathBuf>,
     pub ports: Option<Vec<u16>>,
+    /// Rust function names (1-64, unique v0 demangled leaf names) the lazy
+    /// dev build hot-patches in the running process instead of restarting.
+    /// Requires `make lazy-driver`; at most one app may set it.
+    pub live: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

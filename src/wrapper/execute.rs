@@ -27,6 +27,7 @@ use super::rustc_args::{self, RustcInvocation};
 use super::toolchain_fingerprint;
 use super::{Env, current_env, exit_code};
 use crate::config::{CowMode, Settings, cargo_home};
+use crate::engine::rust;
 use crate::jobserver;
 use crate::remote::peer_client::PeerClient;
 use crate::store::path_placeholders::Placeholders;
@@ -53,6 +54,8 @@ struct Job<'a> {
     /// Expanded rustc args for an incremental warm-up after a hit
     /// (workspace crates compiled with `-C incremental` only).
     warm_args: Option<Vec<OsString>>,
+    rust_action_cache: bool,
+    crate_name: &'a str,
 }
 
 pub fn run(settings: &Settings, program: &Path, args: &[OsString]) -> Option<i32> {
@@ -81,20 +84,22 @@ pub fn run(settings: &Settings, program: &Path, args: &[OsString]) -> Option<i32
     // Local crates: keep the checkout path out of the artifacts so other
     // worktrees can share them (debuggers see the remapped prefixes).
     let local = cacheable.source_kind == SourceKind::Local;
-    let mut run_args = args.to_vec();
+    let mut remapped;
     // A remap the user (or `ns release`, for CARGO_HOME) already set is kept;
     // ours is skipped only when one covers the crate's own sources.
-    let inv = if local && !remaps_path(&inv, &cacheable.source_root) {
+    let (run_args, inv) = if local && !remaps_path(&inv, &cacheable.source_root) {
+        remapped = args.to_vec();
         for (from, to) in [
             (&cacheable.source_root, REMAP_WORKSPACE),
             (&cacheable.profile_dir, REMAP_TARGET),
         ] {
-            run_args.push("--remap-path-prefix".into());
-            run_args.push(format!("{}={to}", from.display()).into());
+            remapped.push("--remap-path-prefix".into());
+            remapped.push(format!("{}={to}", from.display()).into());
         }
-        rustc_args::parse(&rustc_args::expand_response_files(&run_args, &cwd).ok()?)
+        let inv = rustc_args::parse(&rustc_args::expand_response_files(&remapped, &cwd).ok()?);
+        (remapped.as_slice(), inv)
     } else {
-        inv
+        (args, inv)
     };
     let Some(store_root) = volume_root::store_for(&cacheable.out_dir, &settings.stores) else {
         debug!(out_dir = %cacheable.out_dir.display(), "no store on this volume");
@@ -133,20 +138,31 @@ pub fn run(settings: &Settings, program: &Path, args: &[OsString]) -> Option<i32
     store.append_usage(&Record::Target {
         profile_dir: cacheable.profile_dir.clone(),
     });
+    // Cargo never removes stale `-<hash>` variants on its own. While it
+    // works, a detached sweep+dedup reclaims them under the build lock;
+    // throttled to once per INTERVAL per profile dir by the stamp.
+    crate::commands::sweep_target::maybe_spawn(&cacheable.profile_dir);
     let warm_args = (local && inv.incremental && settings.warm_incremental)
-        .then(|| rustc_args::expand_response_files(&run_args, &cwd).ok())
+        .then(|| rustc_args::expand_response_files(run_args, &cwd).ok())
         .flatten();
+    let rust_action_cache = settings.rust_action_cache
+        && local
+        && cacheable.kind == UnitKind::Library
+        && inv.crate_types.iter().all(|t| t == "lib" || t == "rlib")
+        && inv.emit_kinds().any(|k| k == "dep-info");
     let job = Job {
         settings,
         program,
-        args: &run_args,
-        cwd: cwd.clone(),
+        args: run_args,
+        cwd,
         env,
         cacheable,
         store,
         placeholders,
         tier1,
         warm_args,
+        rust_action_cache,
+        crate_name: inv.crate_name.as_deref().unwrap_or_default(),
     };
 
     if let Some(code) = job.try_hit() {
@@ -167,6 +183,9 @@ pub fn run(settings: &Settings, program: &Path, args: &[OsString]) -> Option<i32
 impl Job<'_> {
     /// Fetch the entry from a peer store into the local one, then restore it.
     fn try_peer(&self) -> Option<i32> {
+        if self.rust_action_cache {
+            return None;
+        }
         let client = PeerClient::new(&self.store, self.settings)?;
         client.fetch(&self.tier1, &|manifest| {
             cache_key::tier2(
@@ -181,7 +200,11 @@ impl Job<'_> {
     }
 
     fn try_hit(&self) -> Option<i32> {
-        let manifest = self.store.read_manifest(&self.tier1)?;
+        let manifest = if self.rust_action_cache {
+            rust::read_manifest(&self.store, &self.tier1)?
+        } else {
+            self.store.read_manifest(&self.tier1)?
+        };
         let key = cache_key::tier2(
             &self.tier1,
             &manifest.env_deps,
@@ -189,13 +212,23 @@ impl Job<'_> {
             &self.placeholders,
             &self.cwd,
         );
-        let entry = self.store.read_entry(&key)?;
         let restore_started = Instant::now();
-        match self.restore(&entry) {
+        let entry = if self.rust_action_cache {
+            rust::read(
+                &self.store,
+                &self.tier1,
+                &key,
+                &self.cacheable.output_stem,
+                self.crate_name,
+            )?
+        } else {
+            self.store.read_entry(&key)?
+        };
+        match self.restore(&entry.outputs, entry.dep_info.as_ref(), false) {
             Ok(()) => {}
             Err(e) => {
                 warn!(crate_name = %entry.crate_name, "restore failed, recompiling: {e:#}");
-                if e.downcast_ref::<CorruptObject>().is_some() {
+                if !self.rust_action_cache && e.downcast_ref::<CorruptObject>().is_some() {
                     self.store.remove_entry(&key);
                 }
                 return None;
@@ -215,27 +248,41 @@ impl Job<'_> {
         Some(0)
     }
 
-    fn restore(&self, entry: &Entry) -> Result<()> {
+    fn restore(
+        &self,
+        outputs: &[OutputFile],
+        dep_info: Option<&DepInfoFile>,
+        link_finished_libraries_only: bool,
+    ) -> Result<()> {
         let out_dir = &self.cacheable.out_dir;
-        for o in &entry.outputs {
-            let object = self.store.object_path(&o.object);
-            let ok = std::fs::metadata(&object).is_ok_and(|m| m.len() == o.size);
-            if !ok {
-                return Err(CorruptObject(o.object.clone()).into());
-            }
-        }
         let pid = std::process::id();
-        let mut staged = Vec::with_capacity(entry.outputs.len() + 1);
+        let mut staged = Vec::with_capacity(outputs.len() + 1);
         let result = (|| -> Result<()> {
-            for o in &entry.outputs {
+            for o in outputs {
+                let finished_library = is_finished_rust_library(&o.name);
+                if link_finished_libraries_only && !finished_library {
+                    continue;
+                }
+                let object = self.store.object_path(&o.object);
+                if !self.rust_action_cache
+                    && !std::fs::metadata(&object).is_ok_and(|m| m.len() == o.size)
+                {
+                    return Err(CorruptObject(o.object.clone()).into());
+                }
+                let mode = if self.rust_action_cache
+                    && self.settings.cow_mode == CowMode::Hardlink
+                    && !finished_library
+                {
+                    // Scratch object files may be opened for writing by
+                    // rustc on the next build. Only final files are aliases.
+                    CowMode::Auto
+                } else {
+                    self.settings.cow_mode
+                };
                 let tmp = out_dir.join(format!(".naspeed-{pid}-{}", o.name));
                 let _ = std::fs::remove_file(&tmp);
-                let method = cow_copy::clone_or_copy(
-                    &self.store.object_path(&o.object),
-                    &tmp,
-                    self.settings.cow_mode,
-                )
-                .with_context(|| format!("restore {}", o.name))?;
+                let method = cow_copy::clone_or_copy(&object, &tmp, mode)
+                    .with_context(|| format!("restore {}", o.name))?;
                 staged.push((tmp.clone(), out_dir.join(&o.name)));
                 if method != cow_copy::Method::Hardlink {
                     // Clones keep the object's read-only mode; rustc must be
@@ -246,7 +293,7 @@ impl Job<'_> {
                     let _ = extern_identity::mark_placed(&tmp);
                 }
             }
-            if let Some(dep) = &entry.dep_info {
+            if let Some(dep) = dep_info {
                 let tmp = out_dir.join(format!(".naspeed-{pid}-{}", dep.name));
                 std::fs::write(&tmp, self.placeholders.decode_dep_info(&dep.text))?;
                 let _ = extern_identity::mark_placed(&tmp);
@@ -266,7 +313,34 @@ impl Job<'_> {
         result
     }
 
+    #[cfg(unix)]
+    fn detach_library_aliases(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let stem = &self.cacheable.output_stem;
+        for ext in ["rlib", "rmeta"] {
+            let path = self.cacheable.out_dir.join(format!("lib{stem}.{ext}"));
+            if std::fs::symlink_metadata(&path)
+                .is_ok_and(|m| m.is_file() && (m.nlink() > 1 || m.permissions().readonly()))
+            {
+                // rustc requires writable output paths even when it would
+                // replace the inode. Unlink our name, not the CAS's bytes.
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("detach shared Rust output {}", path.display()))?;
+            }
+        }
+        Ok(())
+    }
+
     fn compile_and_store(&self, inv: &RustcInvocation) -> i32 {
+        #[cfg(unix)]
+        if self.rust_action_cache
+            && self.settings.cow_mode == CowMode::Hardlink
+            && let Err(e) = self.detach_library_aliases()
+        {
+            eprintln!("naspeed: {e:#}");
+            return 1;
+        }
         let started = SystemTime::now();
         let permit = jobserver::acquire(self.settings, self.args);
         debug!("rustc start");
@@ -289,7 +363,9 @@ impl Job<'_> {
         match self.store_outputs(inv, &output, started, compile_ms) {
             Ok(key) => {
                 info!(crate_name = ?inv.crate_name, %key, "miss stored");
-                if let Some(entry) = self.store.read_entry(&key) {
+                if self.cacheable.kind == UnitKind::BuildScript
+                    && let Some(entry) = self.store.read_entry(&key)
+                {
                     self.install_build_script_launcher(&entry);
                 }
             }
@@ -432,8 +508,14 @@ impl Job<'_> {
         self.store.ensure_room(self.settings.min_free_disk_pct)?;
         let mut outputs = Vec::new();
         for (name, path, mode) in pending {
-            let (object, size) = self.store.ingest_object(&path)?;
-            stamped.push((path, object.clone()));
+            let (object, size) = if self.rust_action_cache {
+                self.store.ingest_verified_object(&path)?
+            } else {
+                self.store.ingest_object(&path)?
+            };
+            if self.settings.cow_mode != CowMode::Hardlink {
+                stamped.push((path, object.clone()));
+            }
             outputs.push(OutputFile {
                 name,
                 object,
@@ -463,15 +545,30 @@ impl Job<'_> {
             dirs: Vec::new(),
             compile_ms,
         };
-        // Objects are already in place; the manifest goes before the entry
-        // so a reader that finds the manifest can compute the same key.
-        self.store
-            .write_manifest(&self.tier1, &Manifest { env_deps })?;
-        self.store.write_entry(&entry)?;
-        if self.settings.cow_mode != CowMode::Hardlink {
-            for (path, object) in &stamped {
-                let _ = extern_identity::stamp(path, object);
+        let manifest = Manifest { env_deps };
+        if self.rust_action_cache {
+            rust::publish(&self.store, &entry, &manifest)?;
+            if self.settings.cow_mode == CowMode::Hardlink {
+                // Rustc has exited. Replace its private output names with
+                // read-only aliases; readers that already opened rmeta keep
+                // their old inode until they finish. Never chmod an alias.
+                for o in entry
+                    .outputs
+                    .iter()
+                    .filter(|o| is_finished_rust_library(&o.name))
+                {
+                    let _ = extern_identity::stamp(&self.store.object_path(&o.object), &o.object);
+                }
+                if let Err(e) = self.restore(&entry.outputs, None, true) {
+                    warn!("could not hardlink compiled action outputs: {e:#}");
+                }
             }
+        } else {
+            self.store.write_manifest(&self.tier1, &manifest)?;
+            self.store.write_entry(&entry)?;
+        }
+        for (path, object) in &stamped {
+            let _ = extern_identity::stamp(path, object);
         }
         self.store.append_usage(&Record::Miss {
             key: key.clone(),
@@ -481,6 +578,10 @@ impl Job<'_> {
         });
         Ok(key)
     }
+}
+
+fn is_finished_rust_library(name: &str) -> bool {
+    name.ends_with(".rlib") || name.ends_with(".rmeta")
 }
 
 /// True when one of the invocation's `--remap-path-prefix` rules rewrites

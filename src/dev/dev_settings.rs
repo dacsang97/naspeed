@@ -39,6 +39,9 @@ pub struct AppSettings {
     pub args: Vec<String>,
     pub env_file: Option<PathBuf>,
     pub ports: Vec<u16>,
+    /// Demand-IR hot-patch selectors from `[dev.apps.<bin>].live`; the build
+    /// publishes patches and the running process applies them in place.
+    pub live: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +239,7 @@ fn resolve_apps(
 ) -> Result<Vec<AppSettings>> {
     let mut used_ports = BTreeMap::new();
     let mut cli_args = (!cli_args.is_empty()).then_some(cli_args);
+    let mut live_bin: Option<String> = None;
     bins.into_iter()
         .map(|bin| {
             let owner = owner(&bin)?;
@@ -261,12 +265,25 @@ fn resolve_apps(
                     .and_then(|app| app.args.clone())
                     .unwrap_or_else(|| cfg.args.clone())
             });
+            let live = override_cfg.and_then(|app| app.live.clone());
+            if let Some(names) = &live {
+                if let Some(other) = &live_bin {
+                    bail!("[dev.apps.{bin}].live conflicts with [dev.apps.{other}].live: one live app per ns dev");
+                }
+                anyhow::ensure!(
+                    (1..=64).contains(&names.len())
+                        && names.iter().all(|n| !n.is_empty()),
+                    "[dev.apps.{bin}].live names 1-64 Rust functions"
+                );
+                live_bin = Some(bin.clone());
+            }
             Ok(AppSettings {
                 bin,
                 owner,
                 args: app_args,
                 env_file: env_file.map(|path| root.join(path)),
                 ports,
+                live: live.map(|names| names.join(",")),
             })
         })
         .collect()

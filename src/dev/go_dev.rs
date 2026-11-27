@@ -33,6 +33,10 @@ struct GoPackage {
     test_deps: BTreeSet<String>,
     build_files: BTreeSet<PathBuf>,
     embed_patterns: GlobSet,
+    /// Raw patterns for the engine's normalized export (the compiled
+    /// `GlobSet` isn't serializable/indexable by the graph service).
+    #[allow(dead_code)]
+    embed_raw: Vec<String>,
     has_cgo: bool,
     test_files: BTreeSet<PathBuf>,
 }
@@ -155,6 +159,7 @@ impl GoGraph {
                 build_files,
                 test_files,
                 embed_patterns,
+                embed_raw: package.embed_patterns,
                 has_cgo,
             });
         }
@@ -328,6 +333,53 @@ impl GoGraph {
             .iter()
             .filter_map(|path| path.strip_prefix(&self.root).ok().map(Path::to_path_buf))
             .collect()
+    }
+
+    /// Export the engine's normalized graph: every package's compile and
+    /// test-only dependency edges, file ownership (listed build/test files
+    /// plus `go:embed` and cgo side inputs as metadata), binaries, module
+    /// roots, and manifest paths. `input_kind` stays the classification
+    /// source of truth; this is the static view for indexing.
+    #[allow(dead_code)] // consumed by the engine graph service once wired.
+    pub fn normalized(&self) -> crate::project::workspace_graph::NormalizedGraph {
+        use crate::project::workspace_graph::{
+            Language, NodeMeta, NormalizedGraph, NormalizedNode,
+        };
+        let nodes = self
+            .packages
+            .iter()
+            .map(|package| NormalizedNode {
+                name: package.import_path.clone(),
+                dir: package.dir.clone(),
+                deps: package.deps.clone(),
+                test_deps: package.test_deps.clone(),
+                bins: self
+                    .bins
+                    .iter()
+                    .filter(|(_, owners)| {
+                        owners.iter().any(|o| o == &package.import_path)
+                    })
+                    .map(|(name, _)| name.clone())
+                    .collect(),
+                test_files: package.test_files.clone(),
+                build_files: package.build_files.clone(),
+                meta: NodeMeta {
+                    owns_all_files: false,
+                    test_suffix: Some("_test.go".to_string()),
+                    embed_globs: package.embed_raw.clone(),
+                    has_cgo: package.has_cgo,
+                },
+            })
+            .collect();
+        NormalizedGraph {
+            root: self.root.clone(),
+            language: Language::Go,
+            nodes,
+            manifests: self.manifests.clone(),
+            module_dirs: self.modules.clone(),
+            module_marker: Some("go.mod".to_string()),
+            ignored_dirs: vec![self.root.join(".ns-dev")],
+        }
     }
 }
 

@@ -4,6 +4,7 @@
 //! into `naspeed zig cc -- …`, which handles argument filtering, the glibc
 //! suffix and target-specific fixes.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -89,15 +90,20 @@ pub fn run(args: LinkArgs) -> Result<u8> {
 
 /// Dispatch for the zig shims' `ar` / `lib` / `*dlltool` symlinks, which
 /// point at this binary and are recognised by their file name.
-pub fn zig_tool_for_argv0(argv0: &Path, rest: &[String]) -> Option<cargo_zigbuild::Zig> {
+pub fn zig_tool_for_argv0(argv0: &Path, rest: &[OsString]) -> Option<cargo_zigbuild::Zig> {
     let name = argv0.file_stem()?.to_str()?;
-    let args = rest.to_vec();
-    match name {
-        "ar" => Some(cargo_zigbuild::Zig::Ar { args }),
-        "lib" => Some(cargo_zigbuild::Zig::Lib { args }),
-        n if n.ends_with("dlltool") => Some(cargo_zigbuild::Zig::Dlltool { args }),
-        _ => None,
+    if !matches!(name, "ar" | "lib") && !name.ends_with("dlltool") {
+        return None;
     }
+    let args = rest
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    Some(match name {
+        "ar" => cargo_zigbuild::Zig::Ar { args },
+        "lib" => cargo_zigbuild::Zig::Lib { args },
+        _ => cargo_zigbuild::Zig::Dlltool { args },
+    })
 }
 
 /// Shell script installed for cargo: `exec naspeed __link <triple> <tool> "$@"`.

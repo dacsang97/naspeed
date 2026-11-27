@@ -32,6 +32,57 @@ pub fn message_format() -> &'static str {
         "--message-format=json"
     }
 }
+/// The rustc-workspace driver `ns dev` hands to cargo: `naspeed-rustc-demand`
+/// (demand-IR launchers, no link step) when it exists, else the lazy or
+/// split-link driver. The env overrides below win; discovery checks next to
+/// this binary, its function-tools sibling dir, and the naspeed config dir.
+fn dev_driver() -> Option<PathBuf> {
+    for (var, file_name) in [
+        ("NASPEED_LAZY_RUN_DRIVER", "naspeed-rustc-demand"),
+        ("NASPEED_SPLIT_LINK_DRIVER", "naspeed-rustc-split"),
+    ] {
+        if let Some(driver) = std::env::var_os(var) {
+            let driver = PathBuf::from(driver);
+            let name_ok = driver
+                .file_name()
+                .is_some_and(|n| n == file_name || (var == "NASPEED_LAZY_RUN_DRIVER" && n == "naspeed-rustc-lazy"));
+            if driver.is_absolute() && name_ok && driver.is_file() {
+                // `ns dev` needs demand IR for dep-image natives; a lazy
+                // path upgrades to its demand sibling when one was built.
+                if var == "NASPEED_LAZY_RUN_DRIVER" {
+                    let demand = driver.with_file_name("naspeed-rustc-demand");
+                    if demand.is_file() {
+                        return Some(demand);
+                    }
+                    continue;
+                }
+                return Some(driver);
+            }
+        }
+    }
+    for file_name in ["naspeed-rustc-demand", "naspeed-rustc-lazy", "naspeed-rustc-split"] {
+        for dir in [
+            std::env::current_exe()
+                .ok()
+                .and_then(|e| e.parent().map(|p| p.to_path_buf())),
+            // A dev checkout's `make lazy-driver`/`function-driver` output
+            // lives in target/function-tools, a sibling of target/<profile>.
+            std::env::current_exe().ok().and_then(|e| {
+                e.parent()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.join("function-tools"))
+            }),
+            Some(crate::config::config_dir().join("bin")),
+        ] {
+            if let Some(candidate) = dir.map(|d| d.join(file_name)) {
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
 
 #[derive(Debug, Default)]
 pub struct CargoOutcome {
@@ -105,9 +156,36 @@ pub fn run_cargo(
     root: &Path,
     args: &[String],
     bus: &LogBus,
+    live: Option<&str>,
     mut tick: impl FnMut() -> bool,
 ) -> Result<CargoOutcome> {
     let mut cmd = cargo_command();
+    // A driver from `make lazy-driver`/`function-driver` routes dev
+    // executables through demand IR, a cached dependency dylib or, with
+    // `live`, an app patch the running process applies in place.
+    if let Some(driver) = dev_driver() {
+        cmd.env("RUSTC_WORKSPACE_WRAPPER", &driver);
+        if let Some(selectors) = live {
+            cmd.env("NASPEED_LAZY_APP_PATCH", selectors);
+        }
+        // The driver only engages for the pinned rustc it was built
+        // against; the `.toolchain` marker `make function-driver` writes
+        // names it, so `ns dev` needs no exported RUSTC. Lazy and split
+        // drivers are symlinks to the shared function driver, so the marker
+        // resolves through the real file. An explicit RUSTC wins.
+        if std::env::var_os("RUSTC").is_none() {
+            let marker = driver
+                .canonicalize()
+                .unwrap_or(driver)
+                .with_extension("toolchain");
+            if let Ok(rustc) = std::fs::read_to_string(marker) {
+                let rustc = rustc.trim();
+                if !rustc.is_empty() && Path::new(rustc).is_file() {
+                    cmd.env("RUSTC", rustc);
+                }
+            }
+        }
+    }
     cmd.args(args)
         .current_dir(root)
         .stdin(Stdio::null())

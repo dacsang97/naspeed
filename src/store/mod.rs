@@ -11,19 +11,24 @@
 //! <root>/tests/<2>/<key>.json        cached passing test-binary runs
 //! <root>/memo/                       source-tree hash memo
 //! <root>/tmp/
+//! <root>/staging/<exec>/                private per-execution dir; lease id = exec id
+//! <root>/views/<project>/<view>/        per-worktree view bookkeeping
 //! ```
 //!
 //! Objects are written before the entry that references them; gc leaves
 //! unreferenced objects alone for a grace period so an in-flight writer's
 //! objects are never collected.
 
+pub mod action_cache;
 #[cfg(windows)]
 mod block_clone;
 pub mod content_hash;
 pub mod cow_copy;
 pub mod key_lock;
+pub mod lease;
 pub mod path_placeholders;
 pub mod physical_usage;
+pub mod tree;
 pub mod usage_log;
 pub mod volume_root;
 
@@ -149,6 +154,11 @@ impl Store {
             "tmp",
             "memo",
             "tests",
+            "actions",
+            "trees",
+            "leases",
+            "staging",
+            "views",
         ] {
             std::fs::create_dir_all(root.join(sub))
                 .with_context(|| format!("create {}", root.join(sub).display()))?;
@@ -177,6 +187,15 @@ impl Store {
     pub fn tests_dir(&self) -> PathBuf {
         self.root.join("tests")
     }
+    pub fn actions_dir(&self) -> PathBuf {
+        self.root.join("actions")
+    }
+    pub fn trees_dir(&self) -> PathBuf {
+        self.root.join("trees")
+    }
+    pub fn leases_dir(&self) -> PathBuf {
+        self.root.join("leases")
+    }
     pub fn index_path(&self) -> PathBuf {
         self.root.join("index.sqlite")
     }
@@ -192,6 +211,30 @@ impl Store {
     }
     pub fn test_result_path(&self, key: &str) -> PathBuf {
         sharded(&self.tests_dir(), key, ".json")
+    }
+    /// Action-result record under `actions/<2>/<key>.json`.
+    pub fn action_path(&self, key: &str) -> PathBuf {
+        sharded(&self.actions_dir(), key, ".json")
+    }
+    /// Output-tree record under `trees/<2>/<digest>.json`.
+    pub fn tree_path(&self, digest: &str) -> PathBuf {
+        sharded(&self.trees_dir(), digest, ".json")
+    }
+    /// Lease directory for one action key (`leases/<key>/`).
+    pub fn lease_dir(&self, key: &str) -> PathBuf {
+        self.leases_dir().join(key)
+    }
+    /// Per-action-key write lock inside the key's lease dir.
+    pub fn action_lock_path(&self, key: &str) -> PathBuf {
+        self.lease_dir(key).join("write.lock")
+    }
+    /// Private execution dirs: `staging/<lease-id>/` on the store volume.
+    pub fn staging_dir(&self) -> PathBuf {
+        self.root.join("staging")
+    }
+    /// Per-worktree view bookkeeping: `views/<project>/<view>/manifest.json`.
+    pub fn views_dir(&self) -> PathBuf {
+        self.root.join("views")
     }
 
     pub fn shared_lock(&self) -> io::Result<FileLock> {
@@ -246,13 +289,27 @@ impl Store {
     /// Put `src`'s content into `objects/` (cloned, so free on CoW volumes)
     /// and return its hash and size. Existing objects are reused.
     pub fn ingest_object(&self, src: &Path) -> Result<(String, u64)> {
+        self.ingest(src, false)
+    }
+
+    /// Never reuse an existing digest path on size alone. A bad same-size
+    /// object is replaced atomically by the newly compiled bytes.
+    pub(crate) fn ingest_verified_object(&self, src: &Path) -> Result<(String, u64)> {
+        self.ingest(src, true)
+    }
+
+    fn ingest(&self, src: &Path, verify: bool) -> Result<(String, u64)> {
         let hash = content_hash::hash_file(src)
             .with_context(|| format!("hash {}", src.display()))?
             .to_hex()
             .to_string();
         let size = std::fs::metadata(src)?.len();
         let dst = self.object_path(&hash);
-        if std::fs::metadata(&dst).is_ok_and(|m| m.len() == size) {
+        if if verify {
+            action_cache::verify_object(self, &hash, size)
+        } else {
+            std::fs::metadata(&dst).is_ok_and(|m| m.len() == size)
+        } {
             return Ok((hash, size));
         }
         if let Some(parent) = dst.parent() {
@@ -269,7 +326,9 @@ impl Store {
         };
         cow_copy::clone_or_copy(src, &tmp, mode)
             .with_context(|| format!("store {}", src.display()))?;
-        crate::platform::set_mode(&tmp, 0o444)?;
+        // Read-only, exec bits kept: binaries must run from the CAS.
+        let mode = crate::platform::mode_of(&std::fs::metadata(src)?) & !0o222;
+        crate::platform::set_mode(&tmp, mode)?;
         place_object(&tmp, &dst, size)?;
         Ok((hash, size))
     }
@@ -280,7 +339,9 @@ impl Store {
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        crate::platform::set_mode(tmp, 0o444)?;
+        // Strip write bits, keep the rest (exec bits included).
+        let mode = crate::platform::mode_of(&std::fs::metadata(tmp)?) & !0o222;
+        crate::platform::set_mode(tmp, mode)?;
         let size = std::fs::metadata(tmp)?.len();
         place_object(tmp, &dst, size)?;
         Ok(())

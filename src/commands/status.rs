@@ -10,7 +10,7 @@ use crate::config::Settings;
 use crate::jobserver::slot_pool;
 use crate::setup::{cargo_config, cargo_config_path, installed_binary};
 use crate::store::Store;
-use crate::store::physical_usage::{Usage, human, target_tree_usage, tree_usage};
+use crate::store::physical_usage::{Usage, human, store_usage, target_tree_usage, tree_usage};
 use crate::store::usage_log;
 
 fn count_files(dir: &Path) -> u64 {
@@ -151,6 +151,14 @@ pub fn run(args: StatusArgs) -> Result<u8> {
         let objects = tree_usage(&store.objects_dir());
         crate::ui_info!("entries"; count = entries);
         usage_line("objects", &objects);
+        // Action-engine split: canonical artifact bytes vs view/staging
+        // scratch vs the physical total on disk.
+        let su = store_usage(root);
+        let vu = crate::engine::output_view::usage(&store);
+        crate::ui_info!("output store";
+            logical = human(su.logical), canonical = human(su.canonical),
+            views_exposed = human(vu.exposed), view_bytes = human(vu.manifests + vu.allocated),
+            staging = human(su.staging), physical = human(su.physical));
         if let Ok(conn) = usage_log::open_index(root) {
             let t = usage_log::totals(root, &conn, 7)?;
             let (hits, misses) = (t.hits, t.misses);

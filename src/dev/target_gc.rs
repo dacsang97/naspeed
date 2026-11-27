@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 use super::log_bus::LogBus;
 use super::process_supervisor::shutdown_requested;
 use super::status_line;
-use crate::gc::{cargo_build_lock, target_sweep};
+use crate::gc::{cargo_build_lock, target_dedup, target_sweep};
 use crate::store::physical_usage::human;
+use crate::store::cow_copy;
 use crate::target_layout;
 
 /// First sweep once the initial check and build have settled.
@@ -44,6 +45,7 @@ pub fn spawn(target_dir: PathBuf, bus: LogBus) -> Option<JoinHandle<()>> {
 
 fn sweep_once(target_dir: &Path, max_age: Option<Duration>, bus: &LogBus) {
     let mut total = target_sweep::SweepStats::default();
+    let mut profiles = Vec::new();
     for profile in target_layout::profile_dirs(target_dir) {
         if shutdown_requested() {
             return;
@@ -51,6 +53,7 @@ fn sweep_once(target_dir: &Path, max_age: Option<Duration>, bus: &LogBus) {
         let Some(_locks) = cargo_build_lock::lock_profile_dir(&profile) else {
             continue;
         };
+        profiles.push(profile.clone());
         match target_sweep::sweep_profile(&profile, false, max_age) {
             Ok(stats) => total.add(&stats),
             Err(err) => {
@@ -71,5 +74,22 @@ fn sweep_once(target_dir: &Path, max_age: Option<Duration>, bus: &LogBus) {
                 total.incremental_sessions_removed
             ),
         );
+    }
+    // Byte-identical files in a profile dir (incremental sessions and rustc
+    // scratch outputs mostly duplicate each other) become clones of one
+    // copy. Skipped silently on volumes without clone support.
+    if !profiles.is_empty() && cow_copy::supports_clone(&profiles[0]) {
+        match target_dedup::dedup(&profiles, false) {
+            Ok(stats) if stats.bytes_freed > 0 => status_line::info(
+                bus,
+                format!(
+                    "target gc deduplicated {} across {} files",
+                    human(stats.bytes_freed),
+                    stats.replaced
+                ),
+            ),
+            Ok(_) => {}
+            Err(err) => status_line::warn(bus, format!("target dedup skipped: {err:#}")),
+        }
     }
 }

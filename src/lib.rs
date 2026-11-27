@@ -10,6 +10,7 @@ pub mod commands;
 pub mod config;
 pub mod cross;
 pub mod dev;
+pub mod engine;
 pub mod gc;
 pub mod image;
 pub mod jobserver;

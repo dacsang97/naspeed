@@ -80,6 +80,31 @@ script declared, so cargo recompiles and naspeed misses. A directory is hashed
 without `.git` and the target dir. Generated files under the profile dir are
 covered by the `OUT_DIR` hash.
 
+### Native Rust action cache
+
+Set `NASPEED_RUST_ACTION_CACHE=1` (or `rust_action_cache = true` in naspeed's
+config) with naspeed active as `RUSTC_WRAPPER`. `ns build`, `ns run` and
+`ns test` then reuse eligible workspace-library artifacts from verified
+action records. Cargo still schedules rustc, links executables and runs
+test harnesses; the test-result cache is unchanged. Registry crates, proc
+macros, build scripts, binary links and test-harness links keep their
+existing handling.
+
+The local-only records share the same `objects/` store. Each hit checks the
+tree and object digests before restoring Cargo's output paths and streams.
+The old workspace-library entry is neither consulted nor written in this
+mode. Peer/CI transfer does not include these records; `gc` expires them
+by age, and the usual free-space and per-workspace-entry limits still gate
+new writes.
+
+On a same-volume Unix filesystem with hardlinks, `NASPEED_COW_MODE=hardlink`
+makes both new and restored `.rlib` and `.rmeta` files read-only aliases of
+the same stored files. Rustc's scratch outputs stay independent, and naspeed
+unlinks the aliases before a rebuild. This works without reflinks. Use
+hardlinks only in trusted worktrees; use a fresh target directory when
+switching away from this mode. The default `auto` mode uses reflinks when
+available and keeps target files independent.
+
 ### Incremental warm-up
 
 A restored crate has no `-C incremental` session, so without help the first
@@ -162,3 +187,49 @@ rustc still honors cargo's own jobserver. naspeed's slots are an extra,
 machine-level limit. Build scripts (for example the `cc` crate compiling C) and
 rustc's codegen threads take tokens from cargo's jobserver, not from naspeed
 slots. Keep `build.jobs` moderate for that reason.
+
+## Action cache (engine contracts)
+
+Beside the rustc-tier entries, the store keeps a language-neutral action
+cache. `src/engine/` defines the contracts; adapters produce them:
+
+- `ActionSpec` — executable and toolchain identity, canonical argv,
+  environment allowlist (names + blake3 value hashes only, never values),
+  platform, the working directory as the `@WORK_DIR@` placeholder, inputs
+  (path + content digest), expected outputs, and a cacheability flag.
+- `ActionResult` — exit status, stdout/stderr stream objects, the output
+  tree, timing and resource observations, producer/trust provenance, and a
+  schema version. The result is not part of its own key.
+
+### Layout
+
+```text
+actions/<2>/<action-key>.json  ActionResult metadata
+trees/<2>/<tree-digest>.json   sorted relative paths + object digest + mode
+objects/<2>/<content-digest>   immutable bytes (shared with everything else)
+leases/<action-key>/           per-key write locks and lease refs
+```
+
+The action key is `blake3` over a documented canonical byte encoding
+(domain tag `naspeed/action-key/1`, fixed field order, u32le lengths and
+counts, sorted env, `/`-separated logical paths). No absolute path is ever
+encoded, so the same logical action keys identically under any worktree;
+changing toolchain, platform, env, inputs, argv or cacheability changes it.
+Golden vectors live in `src/engine/action_key.rs` tests.
+
+### Trust boundary
+
+Records are untrusted bytes. Before a lookup is a hit the store re-verifies:
+the record parses with no unknown fields, the schema version is supported,
+the embedded key matches the requested key, the output tree digest matches
+its content, and every referenced object exists with matching size and
+blake3 digest. Any failure is a typed cache miss and the bad record is
+quarantined (removed) — a corrupt or hostile record can never produce a
+partial hit. Failed actions stay observable but are never hits; unknown
+versions fail closed. Tree paths are validated before any write: absolute
+paths, `..`, `.` components, alternate separators, non-portable names,
+symlink targets escaping the root, and case-colliding names are rejected.
+Objects are committed read-only before any record references them, and
+same-key writers serialize on a lock under `leases/<key>/`, so at most one
+valid result lands and an interrupted object commit leaves an orphan that
+gc can collect after its grace period.

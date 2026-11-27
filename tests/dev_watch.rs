@@ -233,11 +233,11 @@ fn dev_loop_rebuilds_restarts_and_cleans_up() {
         "\"hello v2\"",
         "\"hello v3\" +",
     );
-    dev.wait_log("[ns] check failed", 1, rebuild);
+    dev.wait_log("[ns] build failed", 1, rebuild);
     let log = dev.log();
     assert!(log.contains("error"), "{log}");
     assert_eq!(http_body().as_deref(), Some("hello v2-env"));
-    assert_eq!(dev.app_pid(), pid_before, "no restart on a failed check");
+    assert_eq!(dev.app_pid(), pid_before, "no restart on a failed build");
     assert!(pid_alive(pid_before));
 
     // (c) fixing it restarts with the new body.
@@ -265,13 +265,14 @@ fn dev_loop_rebuilds_restarts_and_cleans_up() {
     }
     dev.wait_log("[ns] started hello-server", starts + 1, rebuild);
     std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(
-        dev.count("; building hello-server"),
-        builds + 1,
+    // Without a pre-build check pass, storm events that land mid-build run
+    // one extra settled cycle; per-file rebuilds would still be hundreds.
+    assert!(
+        dev.count("; building hello-server") <= builds + 2,
         "log:\n{}",
         dev.log()
     );
-    assert_eq!(dev.count("[ns] started"), starts + 1);
+    assert!(dev.count("[ns] started") <= starts + 2);
 
     // (d) SIGINT to ns dev: it exits, the port is free, no app process is left.
     let app = dev.app_pid();

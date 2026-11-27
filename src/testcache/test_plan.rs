@@ -59,40 +59,47 @@ pub struct TestPlan {
 }
 
 /// Uppercase variable names read through `env::var`, `var_os`,
-/// `option_env!`, `env!` or `dotenvy::var` in `.rs` files under `dirs`.
-/// Cargo's own build-time variables are left out: they are paths of this
-/// checkout, or already part of the key.
-pub fn env_names_in(dirs: &[PathBuf], target_dir: &Path) -> Vec<String> {
-    let re = regex::Regex::new(r#"\b(?:var|var_os|option_env!|env!)\s*\(\s*"([A-Z_][A-Z0-9_]*)""#)
-        .expect("static regex");
+/// `option_env!`, `env!` or `dotenvy::var` in a package tree. Cargo's own
+/// build-time variables are paths of this checkout or already in the key.
+fn env_names_in(dir: &Path, target_dir: &Path) -> BTreeSet<String> {
+    static ENV_NAME: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"\b(?:var|var_os|option_env!|env!)\s*\(\s*"([A-Z_][A-Z0-9_]*)""#)
+            .expect("static regex")
+    });
     let mut names = BTreeSet::new();
-    for dir in dirs {
-        let target = target_dir.to_path_buf();
-        let walker = ignore::WalkBuilder::new(dir)
-            .require_git(false)
-            .filter_entry(move |e| !e.path().starts_with(&target))
-            .build();
-        for entry in walker.flatten() {
-            let p = entry.path();
-            if p.extension().is_none_or(|x| x != "rs") {
-                continue;
-            }
-            if let Ok(text) = std::fs::read_to_string(p) {
-                for cap in re.captures_iter(&text) {
-                    let name = &cap[1];
-                    if !name.starts_with("CARGO_") && !name.starts_with("NASPEED_") {
-                        names.insert(name.to_owned());
-                    }
+    let target = target_dir.to_path_buf();
+    let walker = ignore::WalkBuilder::new(dir)
+        .require_git(false)
+        .filter_entry(move |e| !e.path().starts_with(&target))
+        .build();
+    for entry in walker.flatten() {
+        let p = entry.path();
+        if p.extension().is_none_or(|x| x != "rs") {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(p) {
+            for cap in ENV_NAME.captures_iter(&text) {
+                let name = &cap[1];
+                if !name.starts_with("CARGO_") && !name.starts_with("NASPEED_") {
+                    names.insert(name.to_owned());
                 }
             }
         }
     }
-    names.into_iter().collect()
+    names
 }
 
 impl TestPlan {
     pub fn build(project: &Project, store: &Path) -> TestPlan {
         let graph = &project.graph;
+        // Shared dependencies appear in many package closures. Read each
+        // package tree once, then reuse its names without widening any key.
+        let mut names_by_dir = BTreeMap::new();
+        for member in &graph.members {
+            names_by_dir
+                .entry(member.dir.as_path())
+                .or_insert_with(|| env_names_in(&member.dir, &graph.target_dir));
+        }
         let mut packages = BTreeMap::new();
         for member in &graph.members {
             // Forward closure over workspace deps.
@@ -112,7 +119,13 @@ impl TestPlan {
                 .collect();
             dirs.sort();
             dirs.dedup();
-            let env_names = env_names_in(&dirs, &graph.target_dir);
+            let env_names = dirs
+                .iter()
+                .flat_map(|dir| &names_by_dir[dir.as_path()])
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .cloned()
+                .collect();
             packages.insert(
                 member.dir.clone(),
                 PackageInputs {
