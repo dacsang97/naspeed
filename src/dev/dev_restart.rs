@@ -27,7 +27,7 @@ impl DevLoop {
                 );
                 continue;
             };
-            let env = match &slot.settings.env_file {
+            let mut env = match &slot.settings.env_file {
                 Some(path) => match env_file::load(path) {
                     Ok(vars) => vars,
                     Err(err) => {
@@ -40,12 +40,35 @@ impl DevLoop {
                 },
                 None => Vec::new(),
             };
+            if slot.settings.live.is_some() {
+                // The launcher watches the generation's live feed and
+                // applies each published patch in the running process.
+                env.push(("NASPEED_LAZY_APP_LIVE".into(), "1".into()));
+            }
             if let Err(err) = self.toolchain.validate_staged_binary(bin, &binary) {
                 status_line::error(&self.bus, format!("{err:#}"));
                 continue;
             }
             let previous_binary = self.toolchain.final_binary_path(bin, &binary);
             let was_running = slot.pid().is_some();
+            if slot.settings.live.is_some()
+                && was_running
+                && !slot.live_rejected.swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                // The demand build already published this generation's patch
+                // plan through the launcher's live feed; the process applies
+                // it in place when the base and slot layout still match. A
+                // previously rejected patch means stale code is serving, so
+                // that build restarts instead.
+                status_line::ok(
+                    &self.bus,
+                    format!(
+                        "live patch for {bin} queued {} after the change",
+                        status_line::ms(since_change.elapsed())
+                    ),
+                );
+                continue;
+            }
             if let Some(pid) = slot.pid() {
                 status_line::info(&self.bus, format!("stopping {bin} (pid {pid})"));
                 slot.stop(STOP_GRACE);
@@ -111,6 +134,22 @@ impl DevLoop {
                 self.bus
                     .status(slot.settings.bin.clone(), AppState::Crashed { code });
             }
+        }
+        // A live patch the launcher rejected leaves the old code serving;
+        // restart that app so the new generation takes over.
+        let stale: Vec<String> = self
+            .apps
+            .values()
+            .filter(|slot| {
+                slot.settings.live.is_some()
+                    && slot.pid().is_some()
+                    && slot.live_rejected.load(std::sync::atomic::Ordering::Relaxed)
+            })
+            .map(|slot| slot.settings.bin.clone())
+            .collect();
+        for bin in stale {
+            status_line::info(&self.bus, format!("live patch rejected; restarting {bin}"));
+            self.restart(&BTreeSet::from([bin]), Instant::now())?;
         }
         if let Some(tests) = self.tests.as_mut()
             && tests.poll()?.is_some()

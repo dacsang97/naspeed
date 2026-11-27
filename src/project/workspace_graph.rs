@@ -4,10 +4,76 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
+
+/// Project language a normalized graph was exported from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Language {
+    Rust,
+    Go,
+}
+
+/// Adapter-owned language metadata retained on a normalized node. Pure
+/// data — the engine interprets it; the adapter that produced the graph
+/// decides what it means.
+#[derive(Debug, Clone, Default)]
+pub struct NodeMeta {
+    /// Every file under `dir` is a compile input (Rust members: cargo
+    /// rebuilds the crate when anything inside changes).
+    pub owns_all_files: bool,
+    /// File-name suffix marking a test-only input (`_test.go` for Go).
+    pub test_suffix: Option<String>,
+    /// `go:embed` patterns (as listed, `all:` prefix kept) for files under
+    /// `dir` that count as compile inputs without being listed sources.
+    pub embed_globs: Vec<String>,
+    /// cgo side inputs (`.c`/`.h`/...) under `dir` are compile inputs.
+    pub has_cgo: bool,
+}
+
+/// One package/module node, language-neutral.
+#[derive(Debug, Clone)]
+pub struct NormalizedNode {
+    /// Crate name (Rust) or import path (Go).
+    pub name: String,
+    /// Absolute package directory.
+    pub dir: PathBuf,
+    /// Compile-time dependency edges (member names / import paths).
+    pub deps: BTreeSet<String>,
+    /// Test-only dependency edges (Go `TestImports`/`XTestImports`; empty
+    /// for Rust where test deps ride the compile edges).
+    pub test_deps: BTreeSet<String>,
+    /// Shipped binary names this node produces.
+    pub bins: Vec<String>,
+    /// Absolute test-only input files.
+    pub test_files: BTreeSet<PathBuf>,
+    /// Absolute listed compile input files (Go's file lists; empty for
+    /// Rust where `owns_all_files` covers it).
+    pub build_files: BTreeSet<PathBuf>,
+    pub meta: NodeMeta,
+}
+
+/// The normalized project graph both adapters export and the engine
+/// consumes. All paths absolute.
+#[derive(Debug, Clone)]
+pub struct NormalizedGraph {
+    pub root: PathBuf,
+    pub language: Language,
+    pub nodes: Vec<NormalizedNode>,
+    /// Manifest/toolchain files whose change forces a full reload.
+    pub manifests: BTreeSet<PathBuf>,
+    /// Directories that are known module roots (for foreign-module
+    /// detection with `module_marker`).
+    pub module_dirs: BTreeSet<PathBuf>,
+    /// Filename that makes a directory a module root (`go.mod`,
+    /// `Cargo.toml`); `None` disables foreign-module detection.
+    pub module_marker: Option<String>,
+    /// Generated/output dirs whose contents never invalidate actions.
+    pub ignored_dirs: Vec<PathBuf>,
+}
 
 #[derive(Debug, Clone)]
 pub struct Member {
@@ -171,6 +237,61 @@ impl WorkspaceGraph {
             }
         }
         out
+    }
+
+    /// Every manifest/toolchain file whose content can change the graph:
+    /// the workspace and member `Cargo.toml`s plus `Cargo.lock` and any
+    /// rust-toolchain pin. Used by the engine's manifest rescan.
+    pub fn manifest_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = vec![self.root.join("Cargo.toml")];
+        for name in ["Cargo.lock", "rust-toolchain", "rust-toolchain.toml"] {
+            let candidate = self.root.join(name);
+            if candidate.is_file() {
+                paths.push(candidate);
+            }
+        }
+        for member in &self.members {
+            paths.push(member.manifest_path.clone());
+        }
+        paths
+    }
+
+    /// Export the workspace as the engine's normalized graph. Member deps
+    /// are already filtered to workspace members; every file under a
+    /// member dir is a compile input (cargo rebuilds the crate on any of
+    /// them), so `build_files`/`test_files` stay empty and `owns_all_files`
+    /// carries the semantics.
+    pub fn normalized(&self) -> NormalizedGraph {
+        let nodes = self
+            .members
+            .iter()
+            .map(|member| NormalizedNode {
+                name: member.name.clone(),
+                dir: member.dir.clone(),
+                deps: member.deps.clone(),
+                test_deps: BTreeSet::new(),
+                bins: member.bins.clone(),
+                test_files: BTreeSet::new(),
+                build_files: BTreeSet::new(),
+                meta: NodeMeta {
+                    owns_all_files: true,
+                    ..NodeMeta::default()
+                },
+            })
+            .collect();
+        NormalizedGraph {
+            root: self.root.clone(),
+            language: Language::Rust,
+            nodes,
+            manifests: self.manifest_paths().into_iter().collect(),
+            module_dirs: self
+                .members
+                .iter()
+                .map(|member| member.dir.clone())
+                .collect(),
+            module_marker: Some("Cargo.toml".to_string()),
+            ignored_dirs: vec![self.target_dir.clone()],
+        }
     }
 }
 

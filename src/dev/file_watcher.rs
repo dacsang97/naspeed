@@ -6,7 +6,7 @@
 
 use super::log_bus::LogBus;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
@@ -207,9 +207,51 @@ impl FileSnapshot {
     }
 }
 
+/// One debounced watcher batch, root-relative. The journal only observes;
+/// nothing in `ns dev` acts on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeBatch {
+    /// Root-relative paths that changed. Empty when the batch was a
+    /// rescan that produced no visible diff.
+    pub paths: BTreeSet<PathBuf>,
+    /// A rescan (event queue overflow etc.) produced this batch — treat
+    /// any missing paths as unknown, not unchanged.
+    pub rescan: bool,
+}
+
+/// Bounded in-memory journal of watcher batches. The graph service (phase
+/// 4+) drains it to keep its change set current between plans; `ns dev`
+/// itself does not consume it yet.
+#[derive(Default)]
+pub struct ChangeJournal(VecDeque<ChangeBatch>);
+
+/// Oldest batches dropped beyond this depth — the service polls between
+/// plans and the journal exists to cover plan boundaries, not history.
+pub const JOURNAL_CAPACITY: usize = 1024;
+
+#[allow(dead_code)] // drained by the graph service, not `ns dev` yet.
+impl ChangeJournal {
+    fn push(&mut self, batch: ChangeBatch) {
+        self.0.push_back(batch);
+        while self.0.len() > JOURNAL_CAPACITY {
+            self.0.pop_front();
+        }
+    }
+
+    /// All batches since the last drain, in order.
+    pub fn drain(&mut self) -> Vec<ChangeBatch> {
+        self.0.drain(..).collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
 struct WatchState {
     snapshot: FileSnapshot,
     rescan_pending: bool,
+    journal: ChangeJournal,
 }
 
 /// Live watcher; dropping it stops watching.
@@ -284,6 +326,7 @@ impl FileWatcher {
             state: RefCell::new(WatchState {
                 snapshot,
                 rescan_pending: false,
+                journal: ChangeJournal::default(),
             }),
             bus,
         })
@@ -316,6 +359,20 @@ impl FileWatcher {
         added
     }
 
+    fn journal_batch(&self, paths: &BTreeSet<PathBuf>, rescan: bool) {
+        if paths.is_empty() && !rescan {
+            return;
+        }
+        let rel: BTreeSet<PathBuf> = paths
+            .iter()
+            .filter_map(|p| p.strip_prefix(&self.root).ok().map(Path::to_path_buf))
+            .collect();
+        self.state
+            .borrow_mut()
+            .journal
+            .push(ChangeBatch { paths: rel, rescan });
+    }
+
     fn finish_batch(&self, into: &mut BTreeSet<PathBuf>) {
         let rescan_pending = {
             let mut state = self.state.borrow_mut();
@@ -332,21 +389,33 @@ impl FileWatcher {
                 .snapshot
                 .refresh(&self.root, into, &self.filter);
         }
+        self.journal_batch(into, rescan_pending);
+    }
+
+    /// Observation-only journal of every settled/drained batch since the
+    /// last call. `ns dev` does not consume this; the graph service does.
+    #[allow(dead_code)] // drained by the graph service, not `ns dev` yet.
+    pub fn drain_journal(&self) -> Vec<ChangeBatch> {
+        self.state.borrow_mut().journal.drain()
     }
 
     /// Records every change already queued, without waiting.
     pub fn drain(&self, into: &mut BTreeSet<PathBuf>) -> Result<()> {
+        let mut delta = BTreeSet::new();
         loop {
             match self.rx.try_recv() {
                 Ok(msg) => {
-                    self.absorb(msg, into);
+                    self.absorb(msg, &mut delta);
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(()),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     return Err(anyhow!("file watcher stopped"));
                 }
             }
         }
+        into.extend(delta.iter().cloned());
+        self.journal_batch(&delta, false);
+        Ok(())
     }
 
     /// Keeps collecting into `into` until no relevant change arrived for

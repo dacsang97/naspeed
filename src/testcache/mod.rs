@@ -212,8 +212,19 @@ fn store_totals(project: &Project) -> Option<usage_log::Totals> {
 }
 
 pub fn run(args: TestArgs) -> Result<u8> {
-    let project = Project::load_cwd()?;
-    let (mut cmd, plan) = cargo_test_command(&project, args.no_cache, &args.cargo_args)?;
+    let project = if args.no_cache {
+        None
+    } else {
+        Some(Project::load_cwd()?)
+    };
+    let (mut cmd, plan) = match &project {
+        Some(project) => cargo_test_command(project, false, &args.cargo_args)?,
+        None => {
+            let mut cmd = crate::dev::cargo_runner::cargo_command();
+            cmd.arg("test");
+            (cmd, None)
+        }
+    };
     let shown: Vec<String> = args
         .cargo_args
         .iter()
@@ -221,7 +232,7 @@ pub fn run(args: TestArgs) -> Result<u8> {
         .collect();
     crate::ui_info!("running cargo test"; args = shown.join(" "));
     let start = Instant::now();
-    let before = store_totals(&project);
+    let before = project.as_ref().and_then(store_totals);
     // The test runners cargo starts print `(cached)` lines one level deeper.
     if args.explain {
         cmd.env(EXPLAIN_ENV, "1");
@@ -231,7 +242,7 @@ pub fn run(args: TestArgs) -> Result<u8> {
     }
     // The runners always report per binary; the lines feed the closing
     // "why ran" line and, with --summarize, the run summary.
-    let summary = if plan.is_some() {
+    let summary = if let (Some(project), Some(_)) = (&project, &plan) {
         let dir = project.graph.target_dir.join("naspeed").join("test-runs");
         std::fs::create_dir_all(&dir).context("create test-runs dir")?;
         let id = format!("{}-{}", now_secs(), std::process::id());
@@ -267,7 +278,7 @@ pub fn run(args: TestArgs) -> Result<u8> {
         crate::ui_error!("cargo test failed"; exit_code = code);
     }
     // What this run did, from the store's counters before and after.
-    if let (Some(b), Some(a)) = (before, store_totals(&project)) {
+    if let (Some(b), Some(a)) = (before, project.as_ref().and_then(store_totals)) {
         let _run = crate::ui::indent();
         crate::ui_info!("rustc"; hits = a.hits.saturating_sub(b.hits),
             misses = a.misses.saturating_sub(b.misses));

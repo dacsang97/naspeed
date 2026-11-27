@@ -10,3 +10,5 @@ mod tests {
         assert!(!super::greeting().is_empty());
     }
 }
+
+// benchmark-leaf-edit-marker: stable

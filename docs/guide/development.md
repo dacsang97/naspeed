@@ -53,10 +53,39 @@ and the container's target dirs under `target/linux-*`.
 
 | Script | Purpose |
 |---|---|
-| `scripts/measure_baseline.sh` | Disk usage and build time before and after naspeed (`env`, `sizes`, `warm`, `cold`, `parallel-ram`). Never runs `cargo clean` on a real project. |
+| `scripts/measure_baseline.sh` | Disk usage and build time before and after naspeed (`env`, `sizes`, `warm`, `cold`, `parallel-ram`). `env` now also emits a versioned machine-readable BenchmarkRun JSON record (`schema_version` 1). Never runs `cargo clean` on a real project. |
+| `scripts/measure_action_engine.py` | Collects, floors and compares BenchmarkRun records (`collect`, `floor`, `compare`) for the action-engine benchmarks. |
 | `scripts/target_components.py` | Splits one `target/` dir into registry deps, workspace deps, incremental, build-script `OUT_DIR` and other. Run with `python3 -I`. |
 | `scripts/bench_copies.sh` | Benchmarks naspeed on copies of real projects, never the originals. |
 | `scripts/ci_simulate.sh` | Simulates two runs of the `ns ci init` workflow on fresh runners (Linux container, or `host`). |
+
+### BenchmarkRun records
+
+```sh
+bash scripts/measure_baseline.sh env
+python3 scripts/measure_action_engine.py collect --repo <path> \
+    --scenario <no-op|leaf-edit|core-edit|warm-cache-cold-runner|three-worktree> \
+    --command <cmd>
+python3 scripts/measure_action_engine.py floor --repo ../go-workspace
+python3 scripts/measure_action_engine.py compare --baseline a.json --candidate b.json
+```
+
+`collect` reports the median of five valid samples; the warm-up run is
+recorded but excluded. A sample is invalid when the toolchain, lockfile
+digest, requested targets or cache generation change. Metrics that cannot be
+measured appear as explicit `{"status":"unsupported","reason":...}` objects —
+collection fails loudly rather than silently dropping a key. Environment
+values are redacted to names plus hashes. Reports go under a gitignored
+output dir (`.bench/` when it is ignored, else `NASPEED_BENCH_OUT`, else a
+temp dir) and are never committed.
+
+`floor` measures a Go workspace's mandatory `go test ./... -race -count=1`
+PostgreSQL floor, timed separately from compile/setup: `test_s`/`floor_s` is
+the uncacheable test runtime CI can never go below, `build_s`/`compressible_s`
+is the headroom left for optimization. `floor_share_pct` near 100 means a
+wall-clock CI speedup target is impossible without changing the test suite
+itself. An unreachable postgres yields an explicit unsupported/blocked
+metric, never a faked number.
 
 ## Docs
 

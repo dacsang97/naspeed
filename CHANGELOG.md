@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ns build` and `ns run` for ordinary Cargo projects, without changing `naspeed build` cross targets.
+- Opt-in verified Rust workspace-library actions, with a single stored inode across same-volume hardlink checkouts.
+- Opt-in function-level codegen for incremental, unoptimized Rust workspace builds, using naspeed's pinned rustc driver with Cargo's ordinary linker and test runner.
+- `ns run --split-link` on macOS can reuse a native Rust dependency image and link only the edited binary on eligible dev runs.
+- Opt-in `ns run --lazy` on Apple Silicon compiles Rust functions on first call with LLVM ORC, avoiding the system linker for the selected executable.
+- Opt-in `ns run --lazy-ir SOURCE.rs` generates LLVM IR on first call for standalone Rust crates after normal Rust checking.
+- `ns run --lazy-ir` supports Cargo dev executables on Apple Silicon, reusing per-function LLVM IR across runs and edits when rustc verifies that its codegen inputs are unchanged.
+- Cargo's pre-run check for `ns run --lazy-ir` persists rustc's per-body type-check results across source edits without skipping required diagnostics.
+- Opt-in `NASPEED_LAZY_DEP_IMAGE=1` lets Cargo `ns run --lazy-ir` map a cached, prelinked dependency image with `dyld` while leaving application code on demand.
+- Opt-in `NASPEED_LAZY_APP_IMAGE=1` maps one cached application dylib per Cargo build to share read-only code pages across runs.
+- Opt-in `NASPEED_LAZY_APP_PATCH=main,helper` reuses one Mach-O application base across compatible edits and binds independently cached function dylibs at launch.
+- Opt-in `NASPEED_LAZY_APP_LIVE=1` lets a running Apple Silicon app apply compatible function builds from `ns build --lazy-ir` without a restart, preserving active frames and process state.
+
+### Changed
+
+- Live function patching releases retired Mach-O images after the last call or unwind leaves their dispatch revision; no lifetime update cap.
+- Opt-in `NASPEED_LAZY_APP_CACHE_KEEP=N` prunes old build generations and unreachable native patch images, keeping leased generations and recent rollback builds.
+- Cargo `ns run --lazy-ir` loads verified cached machine objects directly into ORC, skipping LLVM bitcode parsing and re-encoding on object hits.
+- Bound function-codegen object fan-out with stable shards, keep rustc's exact inline dependencies, and answer Cargo's compiler probes without starting a second driver.
+
+- Scan each package tree once per test-cache plan; `ns test --no-cache` skips Cargo metadata and cache accounting.
+- Keep dependency line tables rather than full dependency debug info in naspeed's dev and test builds. Naspeed's own debugger info and release settings are unchanged.
+
 ## [0.13.3](https://github.com/dacsang97/naspeed/compare/v0.13.2...v0.13.3) - 2026-11-22
 
 ### Fixed

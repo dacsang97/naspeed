@@ -14,10 +14,27 @@ pub fn spawn(
     source: LogSource,
     stream: Stream,
 ) -> JoinHandle<()> {
-    thread::spawn(move || read_lines(BufReader::new(pipe), bus, source, stream))
+    spawn_tapped(pipe, bus, source, stream, |_| ())
 }
 
-fn read_lines<R: BufRead>(mut reader: R, bus: LogBus, source: LogSource, stream: Stream) {
+/// `spawn`, plus `tap` observes each emitted line.
+pub fn spawn_tapped(
+    pipe: impl Read + Send + 'static,
+    bus: LogBus,
+    source: LogSource,
+    stream: Stream,
+    tap: impl Fn(&str) + Send + 'static,
+) -> JoinHandle<()> {
+    thread::spawn(move || read_lines(BufReader::new(pipe), bus, source, stream, tap))
+}
+
+fn read_lines<R: BufRead>(
+    mut reader: R,
+    bus: LogBus,
+    source: LogSource,
+    stream: Stream,
+    tap: impl Fn(&str),
+) {
     let mut line = Vec::with_capacity(1024);
     let mut truncated = false;
     loop {
@@ -44,19 +61,19 @@ fn read_lines<R: BufRead>(mut reader: R, bus: LogBus, source: LogSource, stream:
         };
         if eof {
             if !line.is_empty() || truncated {
-                emit(&bus, &source, stream, &mut line, truncated);
+                emit(&bus, &source, stream, &mut line, truncated, &tap);
             }
             break;
         }
         reader.consume(consumed);
         if newline {
-            emit(&bus, &source, stream, &mut line, truncated);
+            emit(&bus, &source, stream, &mut line, truncated, &tap);
             truncated = false;
         }
     }
 }
 
-fn emit(bus: &LogBus, source: &LogSource, stream: Stream, bytes: &mut Vec<u8>, truncated: bool) {
+fn emit(bus: &LogBus, source: &LogSource, stream: Stream, bytes: &mut Vec<u8>, truncated: bool, tap: &dyn Fn(&str)) {
     if bytes.last() == Some(&b'\r') {
         bytes.pop();
     }
@@ -64,10 +81,10 @@ fn emit(bus: &LogBus, source: &LogSource, stream: Stream, bytes: &mut Vec<u8>, t
     if truncated {
         text.push_str(TRUNCATED);
     }
+    tap(&text);
     bus.log(source.clone(), stream, text);
     bytes.clear();
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,6 +98,7 @@ mod tests {
             bus,
             LogSource::App("api".into()),
             Stream::Stdout,
+            |_| (),
         );
         rx.try_iter()
             .filter_map(|event| match event {

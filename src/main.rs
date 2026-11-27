@@ -7,11 +7,7 @@ fn main() -> ExitCode {
 
     // The zig shims' `ar` / `lib` / `*dlltool` links point at this binary.
     if let Some(zig) = args.first().and_then(|argv0| {
-        let rest: Vec<String> = args[1..]
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        naspeed::cross::linker_shim::zig_tool_for_argv0(std::path::Path::new(argv0), &rest)
+        naspeed::cross::linker_shim::zig_tool_for_argv0(std::path::Path::new(argv0), &args[1..])
     }) {
         return match zig.execute() {
             Ok(()) => ExitCode::SUCCESS,

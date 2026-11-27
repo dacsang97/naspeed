@@ -37,13 +37,99 @@ find_target_dirs() {
 }
 
 cmd_env() {
+  local out=""
+  while [ $# -gt 0 ]; do
+    case "$1" in --out) out="$2"; shift 2 ;; *) shift ;; esac
+  done
   echo "date: $(date '+%Y-%m-%d %H:%M:%S %Z')"
   rustc -vV
   cargo -V
   echo "--- ~/.cargo/config.toml"
   cat "$CARGO_HOME_PATH/config.toml" 2>/dev/null || echo "(none)"
   echo "--- wrapper env"
-  env | grep -E '^(RUSTC_WRAPPER|CARGO_|NASPEED_)' | sort || true
+  env | grep -E '^(RUSTC_WRAPPER|CARGO_|NASPEED_|GOWORK)' | sort || true
+  if [ -n "$out" ]; then
+    env_json "$(dirname "$SCRIPT_DIR")" > "$out"
+    echo "wrote $out"
+  else
+    echo "--- BenchmarkRun"
+    env_json "$(dirname "$SCRIPT_DIR")"
+  fi
+}
+
+# Emit one BenchmarkRun JSON object (schema_version "1", scenario "env").
+# Env values are never recorded raw: allowlisted NAMES get sha256-16 of the value.
+env_json() {
+  NASPEED_ENV_REPO="$1" python3 - <<'PYEOF'
+import hashlib, json, os, platform, re, subprocess
+
+def run(argv):
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+        return p.stdout.strip() if p.returncode == 0 else "absent"
+    except OSError:
+        return "absent"
+
+repo = os.environ.get("NASPEED_ENV_REPO", os.getcwd())
+sysname = platform.system().lower()
+osname = {"darwin": "macos", "linux": "linux", "windows": "windows"}.get(sysname, sysname)
+
+fs = "unknown"
+df_out = run(["df", repo]).splitlines()
+mountpoint = df_out[1].split()[-1] if len(df_out) >= 2 else repo
+if sysname == "darwin":
+    info = run(["diskutil", "info", mountpoint])
+    m = re.search(r"Type \(Bundle\):\s*(\S+)", info)
+    if m:
+        fs = m.group(1).lower()
+    else:
+        for line in run(["mount"]).splitlines():
+            if f" on {mountpoint} (" in line:
+                m2 = re.search(r"\((\w+)", line)
+                fs = m2.group(1).lower() if m2 else fs
+else:
+    df = run(["df", "-T", repo]).splitlines()
+    fs = df[1].split()[1].lower() if len(df) >= 2 else run(["stat", "-f", "-c", "%T", repo]).lower()
+
+allow = {}
+for k, v in sorted(os.environ.items()):
+    if k == "RUSTC_WRAPPER" or k == "GOWORK" or k.startswith(("CARGO_", "NASPEED_")):
+        allow[k] = hashlib.sha256(v.encode()).hexdigest()[:16]
+
+dirty = run(["git", "-C", repo, "status", "--porcelain"])
+record = {
+    "schema_version": "1",
+    "scenario": "env",
+    "repository": {
+        "path": os.path.abspath(repo),
+        "revision": run(["git", "-C", repo, "rev-parse", "HEAD"]),
+        "dirty": bool(dirty) and dirty != "absent",
+    },
+    "environment": {
+        "os": osname,
+        "os_version": platform.release(),
+        "arch": platform.machine().lower() or "unknown",
+        "filesystem": fs or "unknown",
+        "toolchains": {
+            "rustc": run(["rustc", "-V"]),
+            "cargo": run(["cargo", "-V"]),
+            "go": run(["go", "version"]),
+            "ns": run(["ns", "--version"]),
+        },
+        "env_allowlist": allow,
+    },
+    "cache_state": {"kind": "none", "detail": "environment snapshot only"},
+    "command": ["measure_baseline.sh", "env"],
+    "samples": [],
+    "median": {},
+    "output_digest": {"status": "unsupported", "reason": "env scenario builds nothing"},
+    "test_summary": {"status": "unsupported", "reason": "no tests run"},
+    "logical_bytes": 0,
+    "allocated_bytes": 0,
+    "canonical_objects": {"status": "unsupported", "reason": "not yet implemented"},
+}
+print(json.dumps(record))
+PYEOF
 }
 
 cmd_sizes() {
@@ -139,7 +225,7 @@ cmd_parallel_ram() {
 }
 
 case "${1:-}" in
-  env) cmd_env ;;
+  env) shift; cmd_env "$@" ;;
   sizes) cmd_sizes ;;
   warm) cmd_warm "$2" "$3" ;;
   cold) cmd_cold "$2" ;;

@@ -11,6 +11,7 @@ store_max_age_days = 14
 min_free_disk_pct = 10   # below this share of free space on the store's volume, misses are not stored
 build_script_cache = true
 workspace_cache = true
+rust_action_cache = false  # local, verified action results for workspace libraries
 workspace_cache_max_entry_mb = 256  # workspace crates with bigger outputs are compiled but not stored (0: no limit)
 cow_mode = "auto"   # auto | copy | hardlink (hardlink: opt-in, objects stay read-only)
 warm_incremental = true  # rebuild incremental state of restored workspace crates in the background
@@ -35,6 +36,7 @@ These override the file:
 | `NASPEED_BUILD_SCRIPT_CACHE=0` | Run build scripts uncached |
 | `NASPEED_UPDATE_CHECK=0` | No update notice in `ns dev` |
 | `NASPEED_WORKSPACE_CACHE=0` | Do not cache workspace crates |
+| `NASPEED_RUST_ACTION_CACHE=1` | Enable the [native Rust action cache](./how-it-works#native-rust-action-cache) |
 | `NASPEED_WORKSPACE_CACHE_MAX_ENTRY_MB` | Size limit for a stored workspace crate (0: none) |
 | `NASPEED_MIN_FREE_DISK_PCT` | Free-space floor for storing misses (0: off) |
 | `NASPEED_NO_AUTO_GC=1` | No background trim (daily, or every 30 min below the free-space floor), and no target sweep in `ns dev` |

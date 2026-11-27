@@ -64,26 +64,26 @@ impl DevLoop {
             self.bus
                 .status(slot.settings.bin.clone(), AppState::Building);
         }
-        let check_scope = self.cargo_check_scope(&rust);
-        let what = if initial {
-            "startup".to_string()
-        } else {
-            self.describe(&rust)
-        };
-        status_line::info(
-            &self.bus,
-            format!("checking {} ({what})", check_scope.describe()),
-        );
-        let args = self.cargo_check_args(&check_scope);
-        let check = self.cargo(&args, pending)?;
-        if check.interrupted {
-            return Ok(());
-        }
-        if !check.success {
-            report_failure(&self.bus, "check", &check, started);
-            self.cycle_done(false, started, check.errors.len());
-            self.restore_app_statuses();
-            return Ok(());
+        // The pre-build check guards `ns test` scope and reports errors on
+        // the startup pass; an edit rebuild lets `cargo build` report the
+        // same errors instead of paying a second cargo scan per change.
+        if initial {
+            let check_scope = self.cargo_check_scope(&rust);
+            status_line::info(
+                &self.bus,
+                format!("checking {} (startup)", check_scope.describe()),
+            );
+            let args = self.cargo_check_args(&check_scope);
+            let check = self.cargo(&args, pending)?;
+            if check.interrupted {
+                return Ok(());
+            }
+            if !check.success {
+                report_failure(&self.bus, "check", &check, started);
+                self.cycle_done(false, started, check.errors.len());
+                self.restore_app_statuses();
+                return Ok(());
+            }
         }
         let bin_names = self
             .settings
@@ -94,11 +94,36 @@ impl DevLoop {
             .join(", ");
         status_line::info(
             &self.bus,
-            format!(
-                "check ok in {}; building {bin_names}",
-                status_line::ms(started.elapsed())
-            ),
+            if initial {
+                format!(
+                    "check ok in {}; building {bin_names}",
+                    status_line::ms(started.elapsed())
+                )
+            } else {
+                format!("building {bin_names} ({})", self.describe(&rust))
+            },
         );
+        // Live-patch fast path: when the only live app's selector bodies are
+        // what changed, `ns patch` rebuilds them without rustc and the
+        // running process flips its own dispatch table — no build, no
+        // restart. Any drift outside that scope falls through to cargo.
+        if !initial && self.try_live_patch(&rust, &other) {
+            self.cycle_done(true, started, 0);
+            if self.settings.test && !self.untested.is_empty() {
+                let paths = std::mem::take(&mut self.untested);
+                let scope = affected_tests::test_scope(
+                    self.toolchain.cargo_graph().expect("cargo graph"),
+                    &paths,
+                );
+                self.tests = Some(TestRun::start(
+                    &self.settings.root,
+                    scope,
+                    paths,
+                    self.bus.clone(),
+                )?);
+            }
+            return Ok(());
+        }
         let args = self.cargo_build_args();
         let build = self.cargo(&args, pending)?;
         if build.interrupted {
@@ -376,6 +401,40 @@ impl DevLoop {
         args
     }
 
+    /// Attempt `ns patch` for the live app: every changed input must be a
+    /// Rust source file owned by that app's package, and the patch must
+    /// apply cleanly. Returns true when the running process picked up the
+    /// new bodies and the build can be skipped entirely.
+    fn try_live_patch(&self, rust: &BTreeSet<PathBuf>, other: &BTreeSet<PathBuf>) -> bool {
+        if !other.is_empty() {
+            return false;
+        }
+        let Some(app) = self.settings.apps.iter().find(|app| app.live.is_some()) else {
+            return false;
+        };
+        let graph = self.toolchain.cargo_graph().expect("cargo graph");
+        if rust
+            .iter()
+            .any(|path| graph.member_for_path(path).map(|m| m.name.as_str()) != Some(app.owner.as_str()))
+        {
+            return false;
+        }
+        let target_dir = graph.target_dir.join("debug").join("deps");
+        match crate::commands::fast_patch::run(&crate::commands::fast_patch::PatchArgs {
+            bin: Some(app.bin.clone()),
+            target_dir: Some(target_dir),
+        }) {
+            Ok(0) => {
+                status_line::info(&self.bus, format!("patched {} live", app.bin));
+                true
+            }
+            Ok(_) | Err(_) => {
+                status_line::info(&self.bus, "live patch out of scope; building".to_string());
+                false
+            }
+        }
+    }
+
     fn cargo_build_args(&self) -> Vec<String> {
         let mut args = vec!["build".to_string(), message_format().to_string()];
         let owners: BTreeSet<&str> = self
@@ -398,7 +457,12 @@ impl DevLoop {
     }
 
     fn cargo(&self, args: &[String], pending: &mut BTreeSet<PathBuf>) -> Result<CargoOutcome> {
-        run_cargo(&self.settings.root, args, &self.bus, || {
+        // Only `cargo build` publishes app patches; `cargo check` and test
+        // builds keep patch mode off.
+        let live = (args.first().map(String::as_str) == Some("build"))
+            .then(|| self.settings.apps.iter().find_map(|app| app.live.as_deref()))
+            .flatten();
+        run_cargo(&self.settings.root, args, &self.bus, live, || {
             let _ = self.watcher.drain(pending);
             shutdown_requested()
         })

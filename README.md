@@ -40,6 +40,10 @@ backs up `~/.cargo/config.toml` and points `build.rustc-wrapper` at naspeed.
 From then on every `cargo` call, from a shell, an IDE, rust-analyzer or an
 agent, goes through the cache.
 
+For a Cargo project, use `ns build`, `ns run`, and `ns test` for the one-shot
+development loop. `build` and `run` reuse the same Cargo target directory
+and rustc cache as plain Cargo; `test` can also replay unchanged passes.
+
 ```sh
 naspeed status --check   # confirm naspeed wraps rustc; store size and hit rate
 naspeed uninstall        # restore the config keys setup changed
@@ -55,7 +59,7 @@ Everything else lives in the [docs site](https://dacsang97.github.io/naspeed/)
 - [Commands](https://dacsang97.github.io/naspeed/guide/commands) —
   `status`, `stats`, `gc`, `purge`, `build`
 - [ns front-end](https://dacsang97.github.io/naspeed/guide/ns) —
-  Cargo and Go `ns dev`; Cargo-only `ns test`, `ns check`, `ns fmt`, `ns release`, `ns image`, and `ns ci init`
+  Cargo `ns build`, `ns run`, `ns test`, `ns check`, and `ns fmt`; Cargo/Go `ns dev`
 - [Test result cache](https://dacsang97.github.io/naspeed/guide/test-cache) and
   [Peer cache over Tailscale](https://dacsang97.github.io/naspeed/guide/peer-cache)
 - [GitHub Actions](https://dacsang97.github.io/naspeed/guide/github-actions) —

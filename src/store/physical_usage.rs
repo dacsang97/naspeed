@@ -145,6 +145,59 @@ pub fn human(bytes: u64) -> String {
     }
 }
 
+/// Byte split for `naspeed status`: logical (what is stored/exposed),
+/// canonical (immutable artifact bytes), view and staging scratch, and
+/// the physical total the store actually allocates.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StoreUsage {
+    /// Sum of all bytes under the store root (as stored).
+    pub logical: u64,
+    /// `objects/` logical bytes: the canonical artifact payloads.
+    pub canonical: u64,
+    /// `views/` bookkeeping bytes.
+    pub view: u64,
+    /// `staging/` in-flight execution bytes.
+    pub staging: u64,
+    /// Allocated bytes when the filesystem reports unshared sizes;
+    /// falls back to `logical` when it cannot.
+    pub physical: u64,
+}
+
+fn sum_or_logical(u: &Usage) -> u64 {
+    u.private.unwrap_or(u.logical)
+}
+
+/// Measure one store: logical/canonical/view/staging sums plus the
+/// physical total (`private` where APFS reports it, logical elsewhere).
+pub fn store_usage(root: &Path) -> StoreUsage {
+    let objects = tree_usage(&root.join("objects"));
+    let entries = tree_usage(&root.join("entries"));
+    let actions = tree_usage(&root.join("actions"));
+    let trees = tree_usage(&root.join("trees"));
+    let views = tree_usage(&root.join("views"));
+    let staging = tree_usage(&root.join("staging"));
+    let tests = tree_usage(&root.join("tests"));
+    let manifests = tree_usage(&root.join("manifests"));
+    let memo = tree_usage(&root.join("memo"));
+    StoreUsage {
+        logical: objects.logical + entries.logical + actions.logical + trees.logical
+            + views.logical + staging.logical + tests.logical + manifests.logical
+            + memo.logical,
+        canonical: objects.logical,
+        view: views.logical,
+        staging: staging.logical,
+        physical: sum_or_logical(&objects)
+            + sum_or_logical(&entries)
+            + sum_or_logical(&actions)
+            + sum_or_logical(&trees)
+            + sum_or_logical(&views)
+            + sum_or_logical(&staging)
+            + sum_or_logical(&tests)
+            + sum_or_logical(&manifests)
+            + sum_or_logical(&memo),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

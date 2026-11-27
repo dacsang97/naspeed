@@ -15,8 +15,10 @@ const SUBCOMMANDS: &[&str] = &[
     "gc",
     "build",
     "purge",
+    "run",
     "help",
     "__link",
+    "__sweep-target",
     "__build-script",
     "zig",
     "dev",
@@ -76,11 +78,38 @@ pub struct Cli {
 )]
 pub struct NsCli {
     #[command(subcommand)]
-    pub command: Command,
+    command: NsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum NsCommand {
+    /// Build a Cargo project, optionally publishing an app patch with --lazy-ir.
+    Build(ForwardCargoArgs),
+    /// Run a Cargo target, optionally generating Rust IR on first call with --lazy-ir.
+    Run(ForwardCargoArgs),
+    /// Rebuild an app patch without rustc; repatches only selector bodies.
+    Patch(commands::fast_patch::PatchArgs),
+    #[command(flatten)]
+    Shared(SharedCommand),
+}
+
+#[derive(Debug, Args)]
+struct ForwardCargoArgs {
+    /// Arguments passed directly to Cargo.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<OsString>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Builds cargo cannot do alone: universal2-apple-darwin and pinned glibc (`<triple>.2.17`).
+    Build(BuildArgs),
+    #[command(flatten)]
+    Shared(SharedCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SharedCommand {
     /// Make every cargo invocation go through naspeed (edits ~/.cargo/config.toml after a backup).
     Setup(SetupArgs),
     /// Undo `setup`, restoring each changed config key.
@@ -89,8 +118,6 @@ pub enum Command {
     Status(StatusArgs),
     /// Shrink the store (LRU), sweep stale artifacts in target dirs, dedup files.
     Gc(GcArgs),
-    /// Builds cargo cannot do alone: universal2-apple-darwin and pinned glibc (`<triple>.2.17`).
-    Build(BuildArgs),
     /// Remove artifacts naspeed placed into a target dir.
     Purge(PurgeArgs),
     /// Watch a Cargo or Go project: build, test, and selectively restart binaries on change.
@@ -131,6 +158,9 @@ pub enum Command {
     /// Cached run of a registry crate's build script (called by its launcher).
     #[command(name = "__build-script", hide = true)]
     BuildScript(BuildScriptArgs),
+    /// Opportunistic sweep+dedup of one profile dir (spawned by the wrapper).
+    #[command(name = "__sweep-target", hide = true)]
+    SweepTarget(SweepTargetArgs),
 }
 
 #[derive(Debug, Args)]
@@ -256,6 +286,12 @@ pub struct WarmIncrementalArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct SweepTargetArgs {
+    /// Cargo profile dir (e.g. target/debug) to sweep and dedup.
+    pub profile_dir: PathBuf,
+}
+
+#[derive(Debug, Args)]
 pub struct LinkArgs {
     pub triple: String,
     /// `cc`, `c++`, `ar` or `ld`.
@@ -265,60 +301,191 @@ pub struct LinkArgs {
 }
 
 pub fn run(args: Vec<OsString>) -> Result<u8> {
-    let command = match args.first() {
-        Some(argv0) if invoked_as_ns(argv0) => NsCli::parse_from(args).command,
-        _ => Cli::parse_from(args).command,
+    let as_ns = args.first().is_some_and(|a| invoked_as_ns(a));
+    let command = if as_ns && !legacy_ns_cross_build(&args) {
+        // Clap consumes a leading `--` before the first forwarded argument.
+        // Cargo needs it to separate its own flags from program arguments.
+        let separator = args.get(2).is_some_and(|a| a == "--");
+        match NsCli::parse_from(args).command {
+            NsCommand::Build(a) => return forward_cargo("build", a, separator),
+            NsCommand::Run(a) => return forward_cargo("run", a, separator),
+            NsCommand::Patch(a) => return commands::fast_patch::run(&a).map_err(Into::into),
+            NsCommand::Shared(command) => command,
+        }
+    } else {
+        match Cli::parse_from(args).command {
+            Command::Build(a) => {
+                reject_go_only("ns build")?;
+                return commands::build::run(a);
+            }
+            Command::Shared(command) => command,
+        }
     };
     match command {
-        Command::Setup(a) => commands::setup::run(a),
-        Command::Uninstall(a) => commands::uninstall::run(a),
-        Command::Status(a) => commands::status::run(a),
-        Command::Gc(a) => commands::gc::run(a),
-        Command::Build(a) => {
-            reject_go_only("ns build")?;
-            commands::build::run(a)
-        }
-        Command::Purge(a) => commands::purge::run(a),
-        Command::Dev(a) => crate::dev::run(a),
-        Command::Update(a) => commands::update::run(a),
-        Command::Release(a) => crate::release::run(a),
-        Command::Image(a) => crate::image::run(a),
-        Command::Ci(c) => {
+        SharedCommand::Setup(a) => commands::setup::run(a),
+        SharedCommand::Uninstall(a) => commands::uninstall::run(a),
+        SharedCommand::Status(a) => commands::status::run(a),
+        SharedCommand::Gc(a) => commands::gc::run(a),
+        SharedCommand::Purge(a) => commands::purge::run(a),
+        SharedCommand::Dev(a) => crate::dev::run(a),
+        SharedCommand::Update(a) => commands::update::run(a),
+        SharedCommand::Release(a) => crate::release::run(a),
+        SharedCommand::Image(a) => crate::image::run(a),
+        SharedCommand::Ci(c) => {
             reject_go_only("ns ci")?;
             crate::ci::run(c)
         }
-        Command::Cache(c) => commands::cache_transfer::run(c),
-        Command::Test(a) => {
+        SharedCommand::Cache(c) => commands::cache_transfer::run(c),
+        SharedCommand::Test(a) => {
             reject_go_only("ns test")?;
             crate::testcache::run(a)
         }
-        Command::Check(a) => {
+        SharedCommand::Check(a) => {
             reject_go_only("ns check")?;
             commands::check::run(a)
         }
-        Command::Fmt(a) => {
+        SharedCommand::Fmt(a) => {
             reject_go_only("ns fmt")?;
             commands::check::run_fmt(a)
         }
-        Command::Stats(a) => commands::stats::run(a),
-        Command::WarmIncremental(a) => {
+        SharedCommand::Stats(a) => commands::stats::run(a),
+        SharedCommand::WarmIncremental(a) => {
             Ok(crate::wrapper::incremental_warm::run(&a.program, &a.args).clamp(0, 255) as u8)
         }
-        Command::TestRun(a) => {
+        SharedCommand::TestRun(a) => {
             Ok(crate::testcache::run_binary(&a.binary, &a.args).clamp(0, 255) as u8)
         }
-        Command::Link(a) => crate::cross::linker_shim::run(a),
-        Command::BuildScript(a) => {
+        SharedCommand::Link(a) => crate::cross::linker_shim::run(a),
+        SharedCommand::BuildScript(a) => {
             Ok(
                 crate::wrapper::build_script_run::run(&a.real, &a.binary_hash, &a.args)
                     .clamp(0, 255) as u8,
             )
         }
-        Command::Zig(zig) => {
+        SharedCommand::Zig(zig) => {
             zig.execute()?;
             Ok(0)
         }
+        SharedCommand::SweepTarget(a) => crate::commands::sweep_target::run(&a.profile_dir),
     }
+}
+
+// Before native `ns build`, the alias also exposed naspeed's special targets.
+fn legacy_ns_cross_build(args: &[OsString]) -> bool {
+    if !args.get(1).is_some_and(|a| a == "build") {
+        return false;
+    }
+    let target = match args.get(2).and_then(|a| a.to_str()) {
+        Some("--target") => args.get(3).and_then(|a| a.to_str()),
+        Some(arg) => arg.strip_prefix("--target="),
+        None => None,
+    };
+    target.is_some_and(|t| {
+        t == "universal2-apple-darwin" || commands::build::split_glibc(t).is_some()
+    })
+}
+
+fn forward_cargo(verb: &str, args: ForwardCargoArgs, separator: bool) -> Result<u8> {
+    use anyhow::Context;
+
+    let mut cmd = crate::dev::cargo_runner::cargo_command();
+    cmd.arg(verb);
+    let mut forwarded = args.args.into_iter().peekable();
+    if !separator
+        && matches!(verb, "build" | "run")
+        && forwarded.next_if(|a| a == "--lazy-ir").is_some()
+    {
+        anyhow::ensure!(
+            cfg!(all(target_os = "macos", target_arch = "aarch64")),
+            "ns {verb} --lazy-ir requires Apple Silicon macOS"
+        );
+        let driver = lazy_driver()?;
+        if verb == "run"
+            && forwarded.peek().is_some_and(|arg| {
+                std::path::Path::new(arg)
+                    .extension()
+                    .is_some_and(|ext| ext == "rs")
+            })
+        {
+            let mut driver = std::process::Command::new(driver);
+            driver.arg("--naspeed-demand-ir").args(forwarded);
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                return Err(driver.exec()).context("run the naspeed demand IR driver");
+            }
+            #[cfg(not(unix))]
+            unreachable!();
+        }
+        if verb == "build" {
+            anyhow::ensure!(
+                std::env::var("NASPEED_LAZY_APP_PATCH").is_ok_and(|value| !value.is_empty()),
+                "ns build --lazy-ir requires nonempty NASPEED_LAZY_APP_PATCH"
+            );
+        }
+        let driver = driver.with_file_name("naspeed-rustc-demand");
+        anyhow::ensure!(
+            driver.is_file(),
+            "run make lazy-driver to install naspeed-rustc-demand"
+        );
+        cmd.env("RUSTC_WORKSPACE_WRAPPER", driver);
+    } else if verb == "run" && !separator && forwarded.next_if(|a| a == "--lazy").is_some() {
+        anyhow::ensure!(
+            cfg!(all(target_os = "macos", target_arch = "aarch64")),
+            "ns run --lazy requires Apple Silicon macOS"
+        );
+        cmd.env("RUSTC_WORKSPACE_WRAPPER", lazy_driver()?);
+    } else if verb == "run" && !separator && forwarded.next_if(|a| a == "--split-link").is_some() {
+        anyhow::ensure!(
+            cfg!(target_os = "macos"),
+            "ns run --split-link is supported on macOS only"
+        );
+        let driver = std::env::var_os("NASPEED_SPLIT_LINK_DRIVER")
+            .context("set NASPEED_SPLIT_LINK_DRIVER to the naspeed-rustc-split path from make function-driver")?;
+        let driver = PathBuf::from(driver);
+        anyhow::ensure!(
+            driver.is_absolute()
+                && driver
+                    .file_name()
+                    .is_some_and(|name| name == "naspeed-rustc-split")
+                && driver.is_file(),
+            "NASPEED_SPLIT_LINK_DRIVER must be an existing absolute path to naspeed-rustc-split"
+        );
+        cmd.env("RUSTC_WORKSPACE_WRAPPER", driver);
+    }
+    if separator {
+        cmd.arg("--");
+    }
+    cmd.args(forwarded);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(cmd.exec()).with_context(|| format!("run cargo {verb}"))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = cmd.status().with_context(|| format!("run cargo {verb}"))?;
+        Ok(crate::wrapper::exit_code(status).clamp(0, 255) as u8)
+    }
+}
+
+fn lazy_driver() -> Result<PathBuf> {
+    use anyhow::Context;
+
+    let driver = std::env::var_os("NASPEED_LAZY_RUN_DRIVER").context(
+        "set NASPEED_LAZY_RUN_DRIVER to the naspeed-rustc-lazy path from make lazy-driver",
+    )?;
+    let driver = PathBuf::from(driver);
+    anyhow::ensure!(
+        driver.is_absolute()
+            && driver
+                .file_name()
+                .is_some_and(|name| name == "naspeed-rustc-lazy")
+            && driver.is_file(),
+        "NASPEED_LAZY_RUN_DRIVER must be an existing absolute path to naspeed-rustc-lazy"
+    );
+    Ok(driver)
 }
 
 fn reject_go_only(command: &str) -> Result<()> {

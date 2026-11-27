@@ -64,6 +64,11 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 tempfile = "3"
 
+# Keep full debugger info for naspeed itself, but only backtrace locations
+# for dependencies built by both cargo build and cargo test.
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = 3
 debug = false

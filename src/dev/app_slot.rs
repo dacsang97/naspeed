@@ -15,6 +15,9 @@ use super::process_supervisor::{GroupChild, STOP_GRACE};
 pub struct AppSlot {
     pub settings: AppSettings,
     pub binary: Option<PathBuf>,
+    /// Set when the launcher rejects a live patch; `ns dev` restarts the app
+    /// on the next poll so stale code cannot keep serving.
+    pub live_rejected: std::sync::Arc<std::sync::atomic::AtomicBool>,
     child: Option<GroupChild>,
     readers: Vec<JoinHandle<()>>,
     bus: LogBus,
@@ -26,6 +29,7 @@ impl AppSlot {
         AppSlot {
             settings,
             binary: None,
+            live_rejected: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             child: None,
             readers: Vec::new(),
             bus,
@@ -65,11 +69,18 @@ impl AppSlot {
             source.clone(),
             Stream::Stdout,
         ));
-        self.readers.push(line_reader::spawn(
+        self.live_rejected.store(false, std::sync::atomic::Ordering::Relaxed);
+        let rejected = self.live_rejected.clone();
+        self.readers.push(line_reader::spawn_tapped(
             stderr,
             self.bus.clone(),
             source,
             Stream::Stderr,
+            move |line| {
+                if line.starts_with("naspeed app live rejected:") {
+                    rejected.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            },
         ));
         self.binary = Some(binary);
         self.child = Some(child);
@@ -145,6 +156,7 @@ mod tests {
             ],
             env_file: None,
             ports: Vec::new(),
+            live: None,
         };
         let (bus, rx) = LogBus::channel();
         let mut slot = AppSlot::new(settings, bus, false);
