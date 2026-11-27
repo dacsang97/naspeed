@@ -1,10 +1,10 @@
-//! No-TTY renderer. Status and cargo lines stay on stderr; app output goes to stdout.
+//! No-TTY renderer. All dev log events are streamed to stdout.
 
 use std::borrow::Cow;
-use std::io::{IsTerminal, Write, stderr, stdout};
+use std::io::{IsTerminal, Write, stdout};
 
 use super::ansi_strip::strip_ansi;
-use super::log_bus::{DevEvent, LogLine, LogSource, Sink};
+use super::log_bus::{DevEvent, LogSource, Sink};
 
 pub struct PlainRenderer {
     /// Tag app lines with `[bin] `; with a single app every app line is
@@ -25,35 +25,31 @@ impl Sink for PlainRenderer {
         let DevEvent::Log(line) = event else {
             return;
         };
-        match &line.source {
-            LogSource::App(bin) => render_app(line, self.tag_apps.then_some(bin.as_str())),
-            LogSource::Ns | LogSource::Build | LogSource::Test => {
-                let mut out = stderr().lock();
-                let _ = writeln!(out, "{}", line.raw);
-            }
-        }
+        let tag = match &line.source {
+            LogSource::App(bin) if self.tag_apps => Some(bin.as_str()),
+            _ => None,
+        };
+        render_line(&line.raw, tag);
     }
 
     fn finish(&mut self) {
         let _ = stdout().flush();
-        let _ = stderr().flush();
     }
 }
 
-fn render_app(line: &LogLine, tag: Option<&str>) {
+fn render_line(raw: &str, tag: Option<&str>) {
     let mut out = stdout().lock();
     let terminal = out.is_terminal();
     let color = terminal && std::env::var_os("NO_COLOR").is_none();
     let raw = if terminal {
-        Cow::Borrowed(line.raw.as_str())
+        Cow::Borrowed(raw)
     } else {
-        Cow::Owned(strip_ansi(&line.raw))
+        Cow::Owned(strip_ansi(raw))
     };
     if let Some(bin) = tag {
         let _ = write!(out, "{}", app_prefix(bin, color));
     }
-    let _ = write!(out, "{raw}");
-    let _ = writeln!(out);
+    let _ = writeln!(out, "{raw}");
 }
 
 fn app_prefix(bin: &str, color: bool) -> String {

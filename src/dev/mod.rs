@@ -34,6 +34,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use anyhow::{Context, Result};
+use clap::Args;
 
 use self::dev_loop::UiCommand;
 use self::dev_settings::{Settings, TuiMode};
@@ -42,12 +43,22 @@ use self::plain_renderer::PlainRenderer;
 use self::process_supervisor::{install_shutdown_handler, request_shutdown};
 use self::toolchain::DevToolchain;
 
-#[derive(Debug)]
+#[derive(Debug, Args)]
 pub struct DevArgs {
+    /// Binary to run; repeat to select multiple project binaries.
+    #[arg(long, action = clap::ArgAction::Append)]
     pub bin: Vec<String>,
+    /// Select every binary in the project.
+    #[arg(long)]
     pub all: bool,
+    /// Disable the interactive terminal interface.
+    #[arg(long)]
     pub no_tui: bool,
+    /// Run tests of changed packages and their dependents after each clean build.
+    #[arg(long)]
     pub test: bool,
+    /// Arguments passed to the only selected binary (after `--`); replace `[dev].args`.
+    #[arg(last = true)]
     pub args: Vec<String>,
 }
 
