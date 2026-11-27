@@ -103,11 +103,12 @@ pipeline; if an app name would collide with it or another assigned filename,
 `app-` is prefixed repeatedly until that session's name is unique.
 
 An interactive stdin/stdout starts the TUI; `--no-tui` or redirected streams
-use plain output, with app lines prefixed by binary on stdout and status/build
-lines on stderr. With a single app its lines carry no `[bin]` prefix, in plain
-output, the TUI and copied text alike. Cargo progress streams as build lines
-while a build runs. Go diagnostics are reported together when a build fails,
-so multi-line compiler and module hints remain intact.
+use plain output. App, build, test, and status logs all go to stdout, so a
+single pipe captures the dev session log. With a single app its lines carry
+no `[bin]` prefix, in plain output, the TUI and copied text alike. Cargo
+progress streams as build lines while a build runs. Go diagnostics are
+reported together when a build fails, so multi-line compiler and module hints
+remain intact.
 
 The TUI's header holds the tabs (All, one per bin, and build, which shows the
 compiler's and `--test` output and turns red when a build fails; click one, or

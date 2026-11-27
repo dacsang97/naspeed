@@ -43,7 +43,7 @@ fn pid_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-/// `ns dev` running in the background with its combined output captured.
+/// `ns dev --no-tui` running in the background with stdout captured.
 struct DevSession {
     child: Child,
     log: Arc<Mutex<String>>,
@@ -66,7 +66,7 @@ impl DevSession {
             }
         }
         let mut child = cmd
-            .arg("dev")
+            .args(["dev", "--no-tui"])
             .current_dir(ws)
             .env("RUSTC_WRAPPER", NASPEED)
             .env("CARGO_TARGET_DIR", ws.join("target"))
@@ -78,22 +78,17 @@ impl DevSession {
             .env("NASPEED_NO_AUTO_GC", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         let log = Arc::new(Mutex::new(String::new()));
-        for pipe in [
-            Box::new(child.stdout.take().unwrap()) as Box<dyn Read + Send>,
-            Box::new(child.stderr.take().unwrap()),
-        ] {
-            let log = log.clone();
-            std::thread::spawn(move || {
-                for line in BufReader::new(pipe).lines().map_while(Result::ok) {
-                    eprintln!("  | {line}");
-                    log.lock().unwrap().push_str(&(line + "\n"));
-                }
-            });
-        }
+        let pipe = child.stdout.take().unwrap();
+        let stdout_log = log.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                eprintln!("  | {line}");
+                stdout_log.lock().unwrap().push_str(&(line + "\n"));
+            }
+        });
         DevSession {
             child,
             log,
@@ -202,6 +197,7 @@ fn dev_loop_rebuilds_restarts_and_cleans_up() {
     let rebuild = Duration::from_secs(120);
     dev.wait_log("[ns] started hello-server", 1, first_build);
     dev.wait_body("hello v1", Duration::from_secs(10));
+    dev.wait_log("listening on", 1, Duration::from_secs(5));
     // cargo's own progress streams while the startup check runs, so a cold
     // workspace shows what it compiles instead of sitting on "checking".
     let log = dev.log();
